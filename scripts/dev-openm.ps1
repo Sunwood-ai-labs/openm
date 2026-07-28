@@ -25,6 +25,7 @@ $env:RAG_OPENAI_API_BASE_URL = "http://127.0.0.1:9/v1"
 $env:RAG_OPENAI_API_KEY = "disabled"
 $env:ENABLE_OLLAMA_API = "false"
 $env:ENABLE_OPENAI_API = "false"
+$env:CORS_ALLOW_ORIGIN = "http://127.0.0.1:5173;http://localhost:5173"
 
 $Python = Join-Path $RepositoryRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {

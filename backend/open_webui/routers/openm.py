@@ -76,6 +76,9 @@ def append_task_event(
         created_at=now(),
     )
     db.add(event)
+    # Make the assigned sequence visible to subsequent event appends in the
+    # same transaction (for example permission + status events).
+    db.flush()
     return event
 
 

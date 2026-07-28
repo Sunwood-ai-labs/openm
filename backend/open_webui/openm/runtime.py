@@ -512,6 +512,9 @@ class OpenMTaskExecutor:
                 created_at=now(),
             )
         )
+        # Permission transitions append two events before commit. Flush so
+        # the next max(sequence) query sees this pending insert.
+        db.flush()
 
 
 executor = OpenMTaskExecutor()

@@ -9,6 +9,7 @@ node_modules
 !.env.openm.example
 .test-data/
 .dev-data*/
+.dev-browser/
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 # Byte-compiled / optimized / DLL files
