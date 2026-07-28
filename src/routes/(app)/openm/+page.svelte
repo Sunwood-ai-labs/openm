@@ -163,7 +163,10 @@
 					event.type === 'agent.tool.requested' &&
 					String(event.data.tool ?? '') === 'Bash'
 			);
-		const terminalFailure = terminalEvents.some((event) => Number(event.data.exit_code ?? 0) !== 0);
+		const terminalFailure = taskEvents.some(
+			(event) =>
+				event.type === 'agent.terminal.output' && Number(event.data.exit_code ?? 0) !== 0
+		);
 		const states: PhaseState[] = [
 			['queued', 'draft'].includes(task.status) ? 'active' : 'complete',
 			task.status === 'preparing'
@@ -185,13 +188,13 @@
 					: 'pending',
 			terminalFailure
 				? 'failed'
-				: hasVerification && !needsAttention
-					? task.status === 'succeeded'
-						? 'complete'
-						: 'active'
-					: needsAttention
-						? 'attention'
-						: 'pending',
+				: task.status === 'succeeded'
+					? 'complete'
+					: hasVerification && !needsAttention
+						? 'active'
+						: needsAttention
+							? 'attention'
+							: 'pending',
 			task.status === 'succeeded'
 				? 'complete'
 				: task.status === 'failed'
