@@ -241,7 +241,17 @@ class OpenMTaskExecutor:
             },
         )
 
-        async for message in query(prompt=task.prompt, options=options):
+        async def prompt_stream():
+            # The Claude Agent SDK only enables can_use_tool callbacks in
+            # streaming mode. A one-item stream preserves the one-shot task
+            # semantics while allowing OpenM to surface permission requests.
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": task.prompt},
+                "parent_tool_use_id": None,
+            }
+
+        async for message in query(prompt=prompt_stream(), options=options):
             if isinstance(message, SystemMessage):
                 session_id = message.data.get("session_id")
                 if session_id:
