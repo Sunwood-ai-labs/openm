@@ -156,7 +156,43 @@ def prepare_task_worktree(
 
 
 def git_diff(worktree: Path) -> str:
-    return _git("diff", "--no-ext-diff", "--", cwd=worktree)
+    sections = [_git("diff", "--no-ext-diff", "--", cwd=worktree)]
+    untracked = _git("ls-files", "--others", "--exclude-standard", cwd=worktree)
+    for relative_path in untracked.splitlines():
+        candidate = _inside(worktree, worktree / relative_path)
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--",
+                os.devnull,
+                str(candidate),
+            ],
+            cwd=str(worktree),
+            env={
+                **os.environ,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if result.returncode not in {0, 1}:
+            message = (result.stderr or result.stdout).strip()
+            raise SandboxError(message or f"Could not diff {relative_path}")
+        normalized_lines = []
+        for line in result.stdout.splitlines():
+            if line.startswith("diff --git "):
+                line = f"diff --git a/{relative_path} b/{relative_path}"
+            elif line.startswith("+++ "):
+                line = f"+++ b/{relative_path}"
+            normalized_lines.append(line)
+        sections.append("\n".join(normalized_lines).strip())
+    return "\n\n".join(section for section in sections if section)
 
 
 def changed_files(worktree: Path) -> list[str]:
