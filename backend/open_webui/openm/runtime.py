@@ -197,6 +197,7 @@ class OpenMTaskExecutor:
             TextBlock,
             ToolResultBlock,
             ToolUseBlock,
+            UserMessage,
             query,
         )
 
@@ -224,6 +225,18 @@ class OpenMTaskExecutor:
             model=task.model,
             fallback_model=OPENM_DEFAULT_MAIN_MODEL,
             cwd=str(worktree),
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": (
+                    "You are running inside an isolated Linux Git worktree. "
+                    f"The exact working directory is {worktree}. "
+                    "Use paths relative to that directory for every file operation; "
+                    "never invent host paths such as /Users/... or C:\\Users\\.... "
+                    "Before reporting that a file was changed, confirm the tool result. "
+                    "Finish with a concise summary of actual changes and validation."
+                ),
+            },
             tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
             allowed_tools=["Read", "Glob", "Grep", "Edit", "Write"],
             disallowed_tools=[],
@@ -277,7 +290,9 @@ class OpenMTaskExecutor:
                                 "tool_use_id": block.id,
                             },
                         )
-                    elif isinstance(block, ToolResultBlock):
+            if isinstance(message, UserMessage) and isinstance(message.content, list):
+                for block in message.content:
+                    if isinstance(block, ToolResultBlock):
                         self._append_event(
                             task_id,
                             user_id,

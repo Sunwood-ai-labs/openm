@@ -307,6 +307,7 @@ async def resume_task(task_id: str, user=Depends(get_verified_user)):
             raise HTTPException(status_code=409, detail="Task cannot be resumed")
         previous = task.status
         task.status = "queued"
+        task.started_at = None
         task.completed_at = None
         task.updated_at = now()
         append_task_event(

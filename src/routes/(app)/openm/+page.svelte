@@ -67,7 +67,12 @@
 		.split('\n')
 		.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
 	$: terminalEvents = events.filter((event) => event.type === 'agent.terminal.output');
-	$: progressPhases = buildProgressPhases(selectedTask, events, pendingPermissions.length > 0);
+	$: currentAttemptEvents = currentAttempt(events);
+	$: progressPhases = buildProgressPhases(
+		selectedTask,
+		currentAttemptEvents,
+		pendingPermissions.length > 0
+	);
 	$: completedPhaseCount = progressPhases.filter((phase) => phase.state === 'complete').length;
 	$: progressPercent = selectedTask
 		? selectedTask.status === 'succeeded'
@@ -77,7 +82,7 @@
 	$: activePhase =
 		progressPhases.find((phase) => ['active', 'attention', 'failed'].includes(phase.state)) ??
 		progressPhases.at(-1);
-	$: latestMeaningfulEvent = [...events]
+	$: latestMeaningfulEvent = [...currentAttemptEvents]
 		.reverse()
 		.find((event) => !['task.status.changed', 'agent.text.delta'].includes(event.type));
 	$: currentAction = pendingPermissions.length
@@ -117,6 +122,16 @@
 	const token = () => localStorage.token ?? '';
 	const setEventFilter = (filter: typeof activeEventFilter) => {
 		activeEventFilter = filter;
+	};
+
+	const currentAttempt = (taskEvents: OpenMEvent[]) => {
+		let startIndex = 0;
+		taskEvents.forEach((event, index) => {
+			if (event.type === 'task.status.changed' && event.data?.to === 'queued') {
+				startIndex = index;
+			}
+		});
+		return taskEvents.slice(startIndex);
 	};
 
 	const buildProgressPhases = (
