@@ -102,6 +102,8 @@ def ensure_project_clone(
             raise SandboxError("Project repository directory is not empty")
         _git(
             "clone",
+            "--depth",
+            "1",
             "--branch",
             default_branch,
             "--single-branch",
