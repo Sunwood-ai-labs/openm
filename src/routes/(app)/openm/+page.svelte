@@ -45,6 +45,18 @@
 		? tasks.filter((task) => task.project_id === selectedProjectId)
 		: tasks;
 	$: pendingPermissions = permissions.filter((permission) => permission.status === 'pending');
+	$: latestDiffEvent = [...events].reverse().find((event) => event.type === 'agent.diff.updated');
+	$: changedFiles = Array.isArray(latestDiffEvent?.data?.files)
+		? (latestDiffEvent?.data.files as string[])
+		: [];
+	$: currentDiff = typeof latestDiffEvent?.data?.diff === 'string' ? latestDiffEvent.data.diff : '';
+	$: additions = currentDiff
+		.split('\n')
+		.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+	$: deletions = currentDiff
+		.split('\n')
+		.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+	$: terminalEvents = events.filter((event) => event.type === 'agent.terminal.output');
 
 	const token = () => localStorage.token ?? '';
 
@@ -610,18 +622,29 @@
 								<p>{selectedTask?.worktree_path ?? 'タスク開始後にworktreeを作成します'}</p>
 							</div>
 							<div class="file-summary">
-								<div><span>FILES</span><strong>0</strong></div>
-								<div><span>ADDITIONS</span><strong class="plus">+0</strong></div>
-								<div><span>DELETIONS</span><strong class="minus">−0</strong></div>
+								<div><span>FILES</span><strong>{changedFiles.length}</strong></div>
+								<div><span>ADDITIONS</span><strong class="plus">+{additions}</strong></div>
+								<div><span>DELETIONS</span><strong class="minus">−{deletions}</strong></div>
 							</div>
-							<div class="inspector-empty">
-								<svg viewBox="0 0 24 24"
-									><path d="M4 4h16v16H4z"></path><path d="M8 9h8"></path><path d="M8 13h6"
-									></path><path d="M8 17h4"></path></svg
-								>
-								<strong>No changes yet</strong>
-								<p>Agentが編集した差分をここで確認できます。</p>
-							</div>
+							{#if changedFiles.length}
+								<div class="changed-files">
+									{#each changedFiles as file}
+										<div><span>M</span>{file}</div>
+									{/each}
+								</div>
+								{#if currentDiff}
+									<pre class="diff-preview">{currentDiff}</pre>
+								{/if}
+							{:else}
+								<div class="inspector-empty">
+									<svg viewBox="0 0 24 24"
+										><path d="M4 4h16v16H4z"></path><path d="M8 9h8"></path><path d="M8 13h6"
+										></path><path d="M8 17h4"></path></svg
+									>
+									<strong>No changes yet</strong>
+									<p>Agentが編集した差分をここで確認できます。</p>
+								</div>
+							{/if}
 						{:else if activeInspector === 'terminal'}
 							<div class="terminal">
 								<div class="terminal-line muted">$ openm status</div>
@@ -631,6 +654,11 @@
 									<span>task</span>
 									{selectedTask?.id.slice(0, 18) ?? '—'}
 								</div>
+								{#each terminalEvents as event}
+									<div class="terminal-line">
+										{String(event.data.output ?? event.data.text ?? '')}
+									</div>
+								{/each}
 								<div class="terminal-line cursor">█</div>
 							</div>
 						{:else}
@@ -1931,6 +1959,37 @@
 
 	.file-summary .minus {
 		color: var(--red);
+	}
+
+	.changed-files {
+		border-bottom: 1px solid var(--line);
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 8px;
+	}
+
+	.changed-files div {
+		display: flex;
+		gap: 9px;
+		padding: 10px 12px;
+		border-bottom: 1px solid #171c19;
+		word-break: break-all;
+	}
+
+	.changed-files span {
+		color: var(--lime);
+	}
+
+	.diff-preview {
+		max-height: 360px;
+		margin: 0;
+		padding: 12px;
+		overflow: auto;
+		background: #080a0a;
+		color: #abb4ae;
+		font:
+			7px/1.6 'JetBrainsMono',
+			monospace;
+		white-space: pre-wrap;
 	}
 
 	.inspector-empty {
