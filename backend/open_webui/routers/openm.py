@@ -26,6 +26,7 @@ from open_webui.models.openm import (
     new_id,
     now,
 )
+from open_webui.openm.runtime import cancel_running_task, schedule_task
 from open_webui.utils.auth import get_verified_user
 
 
@@ -37,11 +38,7 @@ VALID_PERMISSION_DECISIONS = {"allow_once", "allow_for_task", "deny"}
 
 
 def _project_or_404(db, project_id: str, user_id: str) -> OpenMProject:
-    project = (
-        db.query(OpenMProject)
-        .filter_by(id=project_id, user_id=user_id)
-        .first()
-    )
+    project = db.query(OpenMProject).filter_by(id=project_id, user_id=user_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -66,9 +63,7 @@ def append_task_event(
     data: Optional[dict] = None,
 ) -> OpenMTaskEvent:
     sequence = (
-        db.query(func.max(OpenMTaskEvent.sequence))
-        .filter_by(task_id=task.id)
-        .scalar()
+        db.query(func.max(OpenMTaskEvent.sequence)).filter_by(task_id=task.id).scalar()
         or 0
     ) + 1
     event = OpenMTaskEvent(
@@ -174,9 +169,7 @@ def create_project(form: ProjectCreate, user=Depends(get_verified_user)):
 @router.get("/projects/{project_id}", response_model=ProjectModel)
 def get_project(project_id: str, user=Depends(get_verified_user)):
     with get_db() as db:
-        return ProjectModel.model_validate(
-            _project_or_404(db, project_id, user.id)
-        )
+        return ProjectModel.model_validate(_project_or_404(db, project_id, user.id))
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectModel)
@@ -238,7 +231,7 @@ def list_tasks(
 
 
 @router.post("/tasks", response_model=TaskModel, status_code=status.HTTP_201_CREATED)
-def create_task(form: TaskCreate, user=Depends(get_verified_user)):
+async def create_task(form: TaskCreate, user=Depends(get_verified_user)):
     with get_db() as db:
         _project_or_404(db, form.project_id, user.id)
         if form.parent_task_id:
@@ -270,6 +263,7 @@ def create_task(form: TaskCreate, user=Depends(get_verified_user)):
         )
         db.commit()
         db.refresh(task)
+        schedule_task(task.id, user.id)
         return TaskModel.model_validate(task)
 
 
@@ -280,7 +274,8 @@ def get_task(task_id: str, user=Depends(get_verified_user)):
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskModel)
-def cancel_task(task_id: str, user=Depends(get_verified_user)):
+async def cancel_task(task_id: str, user=Depends(get_verified_user)):
+    cancel_running_task(task_id)
     with get_db() as db:
         task = _task_or_404(db, task_id, user.id)
         if task.status in TERMINAL_STATUSES:
@@ -302,7 +297,7 @@ def cancel_task(task_id: str, user=Depends(get_verified_user)):
 
 
 @router.post("/tasks/{task_id}/resume", response_model=TaskModel)
-def resume_task(task_id: str, user=Depends(get_verified_user)):
+async def resume_task(task_id: str, user=Depends(get_verified_user)):
     with get_db() as db:
         task = _task_or_404(db, task_id, user.id)
         if task.status not in {"cancelled", "failed", "timed_out", "waiting_user"}:
@@ -319,15 +314,18 @@ def resume_task(task_id: str, user=Depends(get_verified_user)):
         )
         db.commit()
         db.refresh(task)
+        schedule_task(task.id, user.id)
         return TaskModel.model_validate(task)
 
 
 @router.post("/tasks/{task_id}/retry", response_model=TaskModel)
-def retry_task(task_id: str, user=Depends(get_verified_user)):
+async def retry_task(task_id: str, user=Depends(get_verified_user)):
     with get_db() as db:
         original = _task_or_404(db, task_id, user.id)
         if original.status not in TERMINAL_STATUSES:
-            raise HTTPException(status_code=409, detail="Only terminal tasks can be retried")
+            raise HTTPException(
+                status_code=409, detail="Only terminal tasks can be retried"
+            )
         timestamp = now()
         retry_id = new_id("task")
         retry = OpenMTask(
@@ -355,6 +353,7 @@ def retry_task(task_id: str, user=Depends(get_verified_user)):
         )
         db.commit()
         db.refresh(retry)
+        schedule_task(retry.id, user.id)
         return TaskModel.model_validate(retry)
 
 

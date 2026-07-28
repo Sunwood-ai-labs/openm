@@ -37,6 +37,7 @@ asgiref==3.8.1
 # AI libraries
 openai
 anthropic
+claude-agent-sdk==0.1.63
 google-generativeai==0.8.4
 tiktoken
 

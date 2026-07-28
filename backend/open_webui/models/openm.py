@@ -66,9 +66,7 @@ class OpenMTaskEvent(Base):
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
-            "task_id", "sequence", name="uq_openm_task_event_sequence"
-        ),
+        UniqueConstraint("task_id", "sequence", name="uq_openm_task_event_sequence"),
     )
 
 
