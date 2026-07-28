@@ -39,6 +39,7 @@
 	let submitting = false;
 	let activeInspector: 'changes' | 'terminal' | 'context' = 'changes';
 	let activeEventFilter: 'all' | 'agent' | 'tools' | 'files' | 'system' = 'all';
+	const eventFilters: Array<typeof activeEventFilter> = ['all', 'agent', 'tools', 'files', 'system'];
 
 	type PhaseState = 'pending' | 'active' | 'complete' | 'attention' | 'failed';
 	type ProgressPhase = {
@@ -114,6 +115,9 @@
 	});
 
 	const token = () => localStorage.token ?? '';
+	const setEventFilter = (filter: typeof activeEventFilter) => {
+		activeEventFilter = filter;
+	};
 
 	const buildProgressPhases = (
 		task: OpenMTask | null,
@@ -786,11 +790,10 @@
 									<strong>{filteredEvents.length} signals</strong>
 								</div>
 								<div class="event-filters" aria-label="Filter worklog">
-									{#each ['all', 'agent', 'tools', 'files', 'system'] as filter}
+									{#each eventFilters as filter}
 										<button
 											class:active={activeEventFilter === filter}
-											on:click={() =>
-												(activeEventFilter = filter as typeof activeEventFilter)}
+											on:click={() => setEventFilter(filter)}
 										>
 											{filter}
 										</button>
