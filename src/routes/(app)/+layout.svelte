@@ -311,7 +311,9 @@
 			</div>
 		{/if}
 
-		<Sidebar />
+		{#if !$page.url.pathname.startsWith('/openm')}
+			<Sidebar />
+		{/if}
 
 		{#if loaded}
 			<slot />
