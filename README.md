@@ -1,19 +1,40 @@
-# Open WebUI 👋
+# OpenM
 
-![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
-![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)
-![GitHub repo size](https://img.shields.io/github/repo-size/open-webui/open-webui)
-![GitHub language count](https://img.shields.io/github/languages/count/open-webui/open-webui)
-![GitHub top language](https://img.shields.io/github/languages/top/open-webui/open-webui)
-![GitHub last commit](https://img.shields.io/github/last-commit/open-webui/open-webui?color=red)
-![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Follama-webui%2Follama-wbui&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=hits&edge_flat=false)
-[![Discord](https://img.shields.io/badge/Discord-Open_WebUI-blue?logo=discord&logoColor=white)](https://discord.gg/5rJgQTnV4s)
-[![](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/tjbck)
+OpenM is a self-hosted coding-agent workspace built from Open WebUI `v0.6.5`.
+It runs Claude Agent SDK sessions against GLM through LiteLLM, isolates every
+user in a persistent sandbox, and gives every task its own Git worktree.
 
-**Open WebUI is an [extensible](https://docs.openwebui.com/features/plugin/), feature-rich, and user-friendly self-hosted AI platform designed to operate entirely offline.** It supports various LLM runners like **Ollama** and **OpenAI-compatible APIs**, with **built-in inference engine** for RAG, making it a **powerful AI deployment solution**.
+[![Public repository](https://img.shields.io/badge/repository-public-9cff38)](https://github.com/Sunwood-ai-labs/openm)
+[![Base](https://img.shields.io/badge/Open%20WebUI-v0.6.5-222)](https://github.com/open-webui/open-webui/tree/v0.6.5)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](./LICENSE)
 
-![Open WebUI Demo](./demo.gif)
+![OpenM completed agent task](./docs/screenshots/openm-completed.png)
+
+## OpenM quick start
+
+```powershell
+Copy-Item .env.openm.example .env.openm
+docker compose --env-file .env.openm -f docker-compose.openm.yaml up --build
+```
+
+For local UI development, create `.venv`, install
+`backend/requirements.txt`, then run:
+
+```powershell
+.\scripts\dev-openm.ps1
+npm run dev -- --host 127.0.0.1
+```
+
+- Product specification: [docs/openm-specification.md](./docs/openm-specification.md)
+- Browser validation evidence: [docs/openm-validation.md](./docs/openm-validation.md)
+- LiteLLM model aliases: [config/litellm.yaml](./config/litellm.yaml)
+
+OpenM keeps the upstream BSD 3-Clause notices and attribution. The remainder
+of this README documents the inherited Open WebUI platform.
+
+---
+
+# Open WebUI upstream documentation
 
 > [!TIP]  
 > **Looking for an [Enterprise Plan](https://docs.openwebui.com/enterprise)?** – **[Speak with Our Sales Team Today!](mailto:sales@openwebui.com)**
