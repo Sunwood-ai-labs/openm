@@ -37,6 +37,11 @@ export default defineConfig({
 	build: {
 		sourcemap: true
 	},
+	server: {
+		watch: {
+			ignored: ['**/.dev-*/**', '**/.test-data/**']
+		}
+	},
 	worker: {
 		format: 'es'
 	}
