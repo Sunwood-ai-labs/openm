@@ -12,11 +12,17 @@ services:
         required: false
     environment:
       OPENM_LITELLM_BASE_URL: http://litellm:4000
+      OPENM_AGENT_MODE: ${OPENM_AGENT_MODE:-demo}
+      OPENM_LITELLM_TOKEN: ${OPENM_LITELLM_TOKEN:-sk-openm-local}
       RAG_EMBEDDING_ENGINE: openai
       RAG_OPENAI_API_BASE_URL: http://127.0.0.1:9/v1
       RAG_OPENAI_API_KEY: disabled
       ENABLE_OLLAMA_API: "false"
-      ENABLE_OPENAI_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_BASE_URLS: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-openm-local}
+      OPENAI_API_KEYS: ${LITELLM_MASTER_KEY:-sk-openm-local}
     volumes:
       - openm-data:/app/backend/data
     depends_on:
@@ -30,6 +36,9 @@ services:
     env_file:
       - path: .env.openm
         required: false
+    environment:
+      ZAI_API_KEY: ${ZAI_API_KEY:?ZAI_API_KEY must be provided}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-openm-local}
     volumes:
       - ./config/litellm.yaml:/app/config.yaml:ro
     healthcheck:
