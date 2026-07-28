@@ -6,12 +6,17 @@ services:
     image: openm:0.1.0
     restart: unless-stopped
     ports:
-      - "3000:8080"
+      - "${OPENM_HOST_PORT:-3000}:8080"
     env_file:
       - path: .env.openm
         required: false
     environment:
       OPENM_LITELLM_BASE_URL: http://litellm:4000
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_OPENAI_API_BASE_URL: http://127.0.0.1:9/v1
+      RAG_OPENAI_API_KEY: disabled
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "false"
     volumes:
       - openm-data:/app/backend/data
     depends_on:
