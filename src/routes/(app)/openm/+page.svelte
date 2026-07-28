@@ -406,7 +406,8 @@
 		return titles[event.type] ?? event.type;
 	};
 
-	const eventBody = (event: OpenMEvent) => {
+	const eventBody = (event: OpenMEvent | undefined) => {
+		if (!event) return '';
 		const data = event.data;
 		if (typeof data.text === 'string') return data.text;
 		if (typeof data.command === 'string') return `$ ${data.command}`;
