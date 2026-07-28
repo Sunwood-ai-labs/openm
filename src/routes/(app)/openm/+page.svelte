@@ -38,6 +38,15 @@
 	let taskModel = 'claude-glm-code';
 	let submitting = false;
 	let activeInspector: 'changes' | 'terminal' | 'context' = 'changes';
+	let activeEventFilter: 'all' | 'agent' | 'tools' | 'files' | 'system' = 'all';
+
+	type PhaseState = 'pending' | 'active' | 'complete' | 'attention' | 'failed';
+	type ProgressPhase = {
+		key: string;
+		label: string;
+		shortLabel: string;
+		state: PhaseState;
+	};
 
 	$: selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
 	$: selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
@@ -57,8 +66,155 @@
 		.split('\n')
 		.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
 	$: terminalEvents = events.filter((event) => event.type === 'agent.terminal.output');
+	$: progressPhases = buildProgressPhases(selectedTask, events, pendingPermissions.length > 0);
+	$: completedPhaseCount = progressPhases.filter((phase) => phase.state === 'complete').length;
+	$: progressPercent = selectedTask
+		? selectedTask.status === 'succeeded'
+			? 100
+			: Math.max(8, Math.round((completedPhaseCount / progressPhases.length) * 100))
+		: 0;
+	$: activePhase =
+		progressPhases.find((phase) => ['active', 'attention', 'failed'].includes(phase.state)) ??
+		progressPhases.at(-1);
+	$: latestMeaningfulEvent = [...events]
+		.reverse()
+		.find((event) => !['task.status.changed', 'agent.text.delta'].includes(event.type));
+	$: currentAction = pendingPermissions.length
+		? `${pendingPermissions[0].tool_name} の実行許可を待っています`
+		: selectedTask?.status === 'succeeded'
+			? '実装と検証が完了しました'
+			: selectedTask?.status === 'failed'
+				? eventBody(
+						[...events].reverse().find((event) => event.type === 'agent.failed') ??
+							events[events.length - 1]
+					)
+				: latestMeaningfulEvent
+					? eventBody(latestMeaningfulEvent) || eventTitle(latestMeaningfulEvent)
+					: selectedTask
+						? 'エージェントの最初のアクションを待っています'
+						: 'タスクを選択してください';
+	$: filteredEvents = events.filter((event) => {
+		if (activeEventFilter === 'all') return true;
+		if (activeEventFilter === 'agent') {
+			return ['agent.text.delta', 'agent.message.completed', 'agent.completed', 'agent.failed'].includes(
+				event.type
+			);
+		}
+		if (activeEventFilter === 'tools') {
+			return (
+				event.type.includes('tool') ||
+				event.type === 'agent.terminal.output' ||
+				event.type === 'agent.permission.required'
+			);
+		}
+		if (activeEventFilter === 'files') {
+			return event.type === 'agent.file.changed' || event.type === 'agent.diff.updated';
+		}
+		return event.type === 'task.status.changed' || event.type === 'agent.cancelled';
+	});
 
 	const token = () => localStorage.token ?? '';
+
+	const buildProgressPhases = (
+		task: OpenMTask | null,
+		taskEvents: OpenMEvent[],
+		needsAttention: boolean
+	): ProgressPhase[] => {
+		const phaseDefs = [
+			{ key: 'queue', label: 'Task accepted', shortLabel: 'QUEUED' },
+			{ key: 'sandbox', label: 'Sandbox ready', shortLabel: 'SANDBOX' },
+			{ key: 'inspect', label: 'Codebase inspected', shortLabel: 'INSPECT' },
+			{ key: 'implement', label: 'Changes implemented', shortLabel: 'BUILD' },
+			{ key: 'verify', label: 'Checks verified', shortLabel: 'VERIFY' },
+			{ key: 'deliver', label: 'Ready to review', shortLabel: 'DELIVER' }
+		];
+		if (!task) return phaseDefs.map((phase) => ({ ...phase, state: 'pending' as PhaseState }));
+
+		const has = (types: string[]) => taskEvents.some((event) => types.includes(event.type));
+		const hasInspection = taskEvents.some(
+			(event) =>
+				event.type === 'agent.tool.requested' &&
+				['Glob', 'Grep', 'Read'].includes(String(event.data.tool ?? ''))
+		);
+		const hasImplementation = has(['agent.file.changed', 'agent.diff.updated']);
+		const hasVerification =
+			has(['agent.terminal.output']) ||
+			taskEvents.some(
+				(event) =>
+					event.type === 'agent.tool.requested' &&
+					String(event.data.tool ?? '') === 'Bash'
+			);
+		const terminalFailure = terminalEvents.some((event) => Number(event.data.exit_code ?? 0) !== 0);
+		const states: PhaseState[] = [
+			['queued', 'draft'].includes(task.status) ? 'active' : 'complete',
+			task.status === 'preparing'
+				? 'active'
+				: ['queued', 'draft'].includes(task.status)
+					? 'pending'
+					: 'complete',
+			hasInspection
+				? 'complete'
+				: task.status === 'running'
+					? 'active'
+					: ['succeeded', 'failed'].includes(task.status)
+						? 'complete'
+						: 'pending',
+			hasImplementation
+				? 'complete'
+				: hasInspection && task.status === 'running'
+					? 'active'
+					: 'pending',
+			terminalFailure
+				? 'failed'
+				: hasVerification && !needsAttention
+					? task.status === 'succeeded'
+						? 'complete'
+						: 'active'
+					: needsAttention
+						? 'attention'
+						: 'pending',
+			task.status === 'succeeded'
+				? 'complete'
+				: task.status === 'failed'
+					? 'failed'
+					: 'pending'
+		];
+		return phaseDefs.map((phase, index) => ({ ...phase, state: states[index] }));
+	};
+
+	const taskProgress = (task: OpenMTask) =>
+		({
+			draft: 4,
+			queued: 8,
+			preparing: 18,
+			running: 54,
+			waiting_permission: 72,
+			waiting_user: 72,
+			cancelled: 100,
+			succeeded: 100,
+			failed: 100,
+			timed_out: 100
+		})[task.status] ?? 0;
+
+	const elapsedTime = (task: OpenMTask | null) => {
+		if (!task?.started_at) return '—';
+		const end = task.completed_at ?? Math.floor(Date.now() / 1000);
+		const seconds = Math.max(0, end - task.started_at);
+		if (seconds < 60) return `${seconds}s`;
+		if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+		return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+	};
+
+	const eventKind = (event: OpenMEvent) => {
+		if (event.type === 'agent.terminal.output') return 'SHELL';
+		if (event.type.includes('tool')) return 'TOOL';
+		if (event.type.includes('file') || event.type.includes('diff')) return 'CHANGE';
+		if (event.type.includes('permission')) return 'APPROVAL';
+		if (event.type.includes('failed')) return 'ISSUE';
+		if (event.type.includes('completed')) return 'RESULT';
+		if (event.type.startsWith('task.')) return 'STATE';
+		return 'AGENT';
+	};
 
 	const refresh = async (quiet = false) => {
 		try {
@@ -493,9 +649,12 @@
 									</div>
 									<strong>{task.title}</strong>
 									<p>{task.prompt}</p>
+									<div class="task-progress" aria-label={`${taskProgress(task)}% complete`}>
+										<span style={`width: ${taskProgress(task)}%`}></span>
+									</div>
 									<div class="task-card-foot">
 										<span>⑂ {task.branch_name.replace('openm/', '')}</span>
-										<span>{task.model.replace('claude-', '')}</span>
+										<span>{taskProgress(task)}%</span>
 									</div>
 								</button>
 							{:else}
@@ -532,6 +691,71 @@
 						{/if}
 					</div>
 
+					{#if selectedTask}
+						<section
+							class:attention={pendingPermissions.length > 0}
+							class:failed={selectedTask.status === 'failed'}
+							class="run-overview"
+							aria-label="Task progress"
+						>
+							<div class="run-now">
+								<div class="run-state-mark">
+									<span>{String(progressPhases.findIndex((phase) => phase === activePhase) + 1).padStart(2, '0')}</span>
+								</div>
+								<div class="run-now-copy">
+									<span class="eyebrow"
+										>{pendingPermissions.length ? 'NEEDS YOUR DECISION' : 'NOW WORKING ON'}</span
+									>
+									<strong>{activePhase?.label ?? statusLabel(selectedTask.status)}</strong>
+									<p>{currentAction}</p>
+								</div>
+								<div class="run-percent">
+									<strong>{progressPercent}</strong><span>%</span>
+									<small>{elapsedTime(selectedTask)}</small>
+								</div>
+							</div>
+
+							<div class="phase-rail">
+								{#each progressPhases as phase, index}
+									<div class="phase phase-{phase.state}">
+										<div class="phase-node">
+											<span>{phase.state === 'complete' ? '✓' : index + 1}</span>
+										</div>
+										<div class="phase-copy">
+											<strong>{phase.shortLabel}</strong>
+											<small>{phase.label}</small>
+										</div>
+										{#if index < progressPhases.length - 1}<i></i>{/if}
+									</div>
+								{/each}
+							</div>
+
+							<div class="run-facts">
+								<div><span>EVENTS</span><strong>{events.length}</strong></div>
+								<div><span>FILES TOUCHED</span><strong>{changedFiles.length}</strong></div>
+								<div>
+									<span>LAST SIGNAL</span>
+									<strong>{latestMeaningfulEvent ? relativeTime(latestMeaningfulEvent.timestamp) : '—'}</strong>
+								</div>
+								<div>
+									<span>RUN HEALTH</span>
+									<strong
+										class:warn={pendingPermissions.length > 0}
+										class:error={selectedTask.status === 'failed'}
+									>
+										{selectedTask.status === 'failed'
+											? 'BLOCKED'
+											: pendingPermissions.length
+												? 'NEEDS YOU'
+												: selectedTask.status === 'succeeded'
+													? 'VERIFIED'
+													: 'ON TRACK'}
+									</strong>
+								</div>
+							</div>
+						</section>
+					{/if}
+
 					<div class="activity-feed">
 						{#each pendingPermissions as permission}
 							<div class="permission-card">
@@ -555,14 +779,39 @@
 							</div>
 						{/each}
 
-						{#each events as event, index}
+						{#if events.length}
+							<div class="worklog-toolbar">
+								<div>
+									<span class="eyebrow">WORKLOG</span>
+									<strong>{filteredEvents.length} signals</strong>
+								</div>
+								<div class="event-filters" aria-label="Filter worklog">
+									{#each ['all', 'agent', 'tools', 'files', 'system'] as filter}
+										<button
+											class:active={activeEventFilter === filter}
+											on:click={() =>
+												(activeEventFilter = filter as typeof activeEventFilter)}
+										>
+											{filter}
+										</button>
+									{/each}
+								</div>
+							</div>
+						{/if}
+
+						{#each filteredEvents as event, index}
 							<div class="event-row">
 								<div class="timeline">
-									<span class:event-active={index === events.length - 1}></span>
+									<span class:event-active={index === filteredEvents.length - 1}></span>
 								</div>
 								<div class="event-card event-{event.type.replaceAll('.', '-')}">
 									<div class="event-meta">
-										<strong>{eventTitle(event)}</strong>
+										<div>
+											<span class="event-kind kind-{eventKind(event).toLowerCase()}"
+												>{eventKind(event)}</span
+											>
+											<strong>{eventTitle(event)}</strong>
+										</div>
 										<time
 											>{new Date(event.timestamp * 1000).toLocaleTimeString('ja-JP', {
 												hour: '2-digit',
@@ -1411,7 +1660,7 @@
 
 	.activity-column {
 		display: grid;
-		grid-template-rows: 55px minmax(0, 1fr) auto;
+		grid-template-rows: 55px auto minmax(0, 1fr) auto;
 	}
 
 	.column-heading {
@@ -1538,6 +1787,21 @@
 		line-height: 15px;
 	}
 
+	.task-progress {
+		height: 2px;
+		margin-top: 11px;
+		overflow: hidden;
+		background: #272c29;
+	}
+
+	.task-progress span {
+		display: block;
+		height: 100%;
+		background: linear-gradient(90deg, var(--cyan), var(--lime));
+		box-shadow: 0 0 9px rgba(199, 243, 107, 0.25);
+		transition: width 0.45s ease;
+	}
+
 	.task-card-foot {
 		margin-top: 10px;
 		color: #555c58;
@@ -1612,6 +1876,265 @@
 
 	.activity-heading {
 		padding-right: 11px;
+	}
+
+	.run-overview {
+		border-bottom: 1px solid var(--line);
+		background:
+			linear-gradient(120deg, rgba(105, 216, 218, 0.055), transparent 46%),
+			#0f1211;
+	}
+
+	.run-overview.attention {
+		background:
+			linear-gradient(120deg, rgba(255, 180, 84, 0.1), transparent 50%),
+			#12110e;
+	}
+
+	.run-overview.failed {
+		background:
+			linear-gradient(120deg, rgba(255, 107, 95, 0.1), transparent 50%),
+			#130f0e;
+	}
+
+	.run-now {
+		min-height: 72px;
+		padding: 11px 13px 9px;
+		display: grid;
+		grid-template-columns: 39px minmax(0, 1fr) auto;
+		gap: 11px;
+		align-items: center;
+	}
+
+	.run-state-mark {
+		width: 37px;
+		height: 37px;
+		display: grid;
+		place-items: center;
+		border: 1px solid rgba(105, 216, 218, 0.45);
+		background: rgba(105, 216, 218, 0.08);
+		color: var(--cyan);
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 9px;
+		position: relative;
+	}
+
+	.run-state-mark::after {
+		content: '';
+		position: absolute;
+		inset: 4px;
+		border: 1px solid rgba(105, 216, 218, 0.16);
+	}
+
+	.attention .run-state-mark {
+		border-color: var(--amber);
+		background: rgba(255, 180, 84, 0.08);
+		color: var(--amber);
+	}
+
+	.failed .run-state-mark {
+		border-color: var(--red);
+		background: rgba(255, 107, 95, 0.08);
+		color: var(--red);
+	}
+
+	.run-now-copy {
+		min-width: 0;
+	}
+
+	.run-now-copy > strong {
+		display: block;
+		margin-top: 3px;
+		font-size: 12px;
+		font-weight: 650;
+		letter-spacing: -0.15px;
+	}
+
+	.run-now-copy p {
+		margin: 3px 0 0;
+		overflow: hidden;
+		color: #8b938e;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 7px;
+		line-height: 1.45;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.run-percent {
+		min-width: 53px;
+		text-align: right;
+	}
+
+	.run-percent strong {
+		font-family: 'InstrumentSerif', serif;
+		font-size: 28px;
+		font-weight: 400;
+		line-height: 1;
+	}
+
+	.run-percent > span {
+		color: var(--cyan);
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 8px;
+	}
+
+	.run-percent small {
+		display: block;
+		margin-top: 2px;
+		color: #656d68;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 7px;
+	}
+
+	.phase-rail {
+		padding: 4px 13px 10px;
+		display: grid;
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+	}
+
+	.phase {
+		min-width: 0;
+		position: relative;
+	}
+
+	.phase-node {
+		width: 18px;
+		height: 18px;
+		display: grid;
+		place-items: center;
+		border: 1px solid #3d4440;
+		border-radius: 50%;
+		background: #101312;
+		color: #626a65;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 6px;
+		position: relative;
+		z-index: 2;
+	}
+
+	.phase > i {
+		position: absolute;
+		top: 8px;
+		left: 18px;
+		right: 0;
+		height: 1px;
+		background: #303532;
+	}
+
+	.phase-complete .phase-node {
+		border-color: var(--lime);
+		background: var(--lime);
+		color: #11150e;
+	}
+
+	.phase-complete > i {
+		background: var(--lime);
+	}
+
+	.phase-active .phase-node {
+		border-color: var(--cyan);
+		background: rgba(105, 216, 218, 0.12);
+		color: var(--cyan);
+		box-shadow: 0 0 0 4px rgba(105, 216, 218, 0.07);
+		animation: phase-pulse 1.8s ease-in-out infinite;
+	}
+
+	.phase-attention .phase-node {
+		border-color: var(--amber);
+		background: rgba(255, 180, 84, 0.15);
+		color: var(--amber);
+	}
+
+	.phase-failed .phase-node {
+		border-color: var(--red);
+		background: rgba(255, 107, 95, 0.14);
+		color: var(--red);
+	}
+
+	.phase-copy {
+		margin-top: 5px;
+		padding-right: 3px;
+	}
+
+	.phase-copy strong,
+	.phase-copy small {
+		display: block;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.phase-copy strong {
+		color: #626a65;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 6px;
+		letter-spacing: 0.45px;
+	}
+
+	.phase-copy small {
+		display: none;
+	}
+
+	.phase-active .phase-copy strong {
+		color: var(--cyan);
+	}
+
+	.phase-complete .phase-copy strong {
+		color: #9fb779;
+	}
+
+	.phase-attention .phase-copy strong {
+		color: var(--amber);
+	}
+
+	.phase-failed .phase-copy strong {
+		color: var(--red);
+	}
+
+	.run-facts {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		border-top: 1px solid #202522;
+	}
+
+	.run-facts div {
+		min-width: 0;
+		padding: 7px 10px;
+		border-right: 1px solid #202522;
+	}
+
+	.run-facts div:last-child {
+		border-right: 0;
+	}
+
+	.run-facts span,
+	.run-facts strong {
+		display: block;
+		font-family: 'JetBrainsMono', monospace;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.run-facts span {
+		color: #5e6661;
+		font-size: 6px;
+		letter-spacing: 0.65px;
+	}
+
+	.run-facts strong {
+		margin-top: 3px;
+		color: #b8bfba;
+		font-size: 8px;
+	}
+
+	.run-facts strong.warn {
+		color: var(--amber);
+	}
+
+	.run-facts strong.error {
+		color: var(--red);
 	}
 
 	.task-controls {
@@ -1753,6 +2276,52 @@
 		color: #17110b;
 	}
 
+	.worklog-toolbar {
+		margin: 2px 0 12px;
+		padding-bottom: 9px;
+		display: flex;
+		align-items: flex-end;
+		justify-content: space-between;
+		gap: 10px;
+		border-bottom: 1px solid #252a27;
+	}
+
+	.worklog-toolbar > div:first-child strong {
+		display: block;
+		margin-top: 3px;
+		color: #aab1ad;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 8px;
+		font-weight: 500;
+	}
+
+	.event-filters {
+		display: flex;
+		gap: 3px;
+	}
+
+	.event-filters button {
+		padding: 4px 6px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: #626a65;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 6px;
+		letter-spacing: 0.3px;
+		text-transform: uppercase;
+		cursor: pointer;
+	}
+
+	.event-filters button:hover {
+		color: #aab1ad;
+	}
+
+	.event-filters button.active {
+		border-color: #3b423e;
+		background: #181c1a;
+		color: var(--lime);
+	}
+
 	.event-row {
 		display: grid;
 		grid-template-columns: 18px minmax(0, 1fr);
@@ -1802,8 +2371,51 @@
 	}
 
 	.event-meta strong {
+		display: inline;
 		font-size: 9px;
 		font-weight: 600;
+	}
+
+	.event-meta > div {
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 7px;
+	}
+
+	.event-kind {
+		flex: none;
+		min-width: 42px;
+		padding: 3px 4px 2px;
+		border: 1px solid #353b38;
+		color: #7d8580;
+		font-family: 'JetBrainsMono', monospace;
+		font-size: 5px;
+		font-weight: 800;
+		letter-spacing: 0.45px;
+		text-align: center;
+	}
+
+	.event-kind.kind-change,
+	.event-kind.kind-result {
+		border-color: rgba(199, 243, 107, 0.38);
+		color: var(--lime);
+	}
+
+	.event-kind.kind-tool,
+	.event-kind.kind-shell {
+		border-color: rgba(105, 216, 218, 0.38);
+		color: var(--cyan);
+	}
+
+	.event-kind.kind-approval {
+		border-color: rgba(255, 180, 84, 0.45);
+		color: var(--amber);
+	}
+
+	.event-kind.kind-issue {
+		border-color: rgba(255, 107, 95, 0.5);
+		color: var(--red);
 	}
 
 	.event-meta time {
@@ -2186,6 +2798,16 @@
 	@keyframes blink {
 		50% {
 			opacity: 0;
+		}
+	}
+
+	@keyframes phase-pulse {
+		0%,
+		100% {
+			box-shadow: 0 0 0 3px rgba(105, 216, 218, 0.04);
+		}
+		50% {
+			box-shadow: 0 0 0 5px rgba(105, 216, 218, 0.11);
 		}
 	}
 
