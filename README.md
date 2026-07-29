@@ -5,6 +5,7 @@ It runs Claude Agent SDK sessions against GLM through LiteLLM, isolates every
 user in a persistent sandbox, and gives every task its own Git worktree.
 
 [![Public repository](https://img.shields.io/badge/repository-public-9cff38)](https://github.com/Sunwood-ai-labs/openm)
+[![Release](https://img.shields.io/badge/release-v0.1.0-9cff38)](https://github.com/Sunwood-ai-labs/openm/releases/tag/v0.1.0)
 [![Base](https://img.shields.io/badge/Open%20WebUI-v0.6.5-222)](https://github.com/open-webui/open-webui/tree/v0.6.5)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](./LICENSE)
 
@@ -27,6 +28,8 @@ npm run dev -- --host 127.0.0.1
 
 - Product specification: [docs/openm-specification.md](./docs/openm-specification.md)
 - Browser validation evidence: [docs/openm-validation.md](./docs/openm-validation.md)
+- v0.1.0 release notes: [docs/releases/v0.1.0.md](./docs/releases/v0.1.0.md)
+- v0.1.0 walkthrough: [docs/guides/openm-v0.1.0-walkthrough.md](./docs/guides/openm-v0.1.0-walkthrough.md)
 - LiteLLM model aliases: [config/litellm.yaml](./config/litellm.yaml)
 
 OpenM keeps the upstream BSD 3-Clause notices and attribution. The remainder

@@ -153,7 +153,7 @@ OpenMは、ユーザーごとに隔離されたクラウド開発環境を持ち
 | 主要モデル | Z.AI GLMのコーディング向けモデル |
 | ユーザー隔離 | 1ユーザーにつき1永続Sandbox |
 | タスク隔離 | 1タスクにつき1 Git worktree＋1 Agent SDKセッション |
-| リアルタイム通信 | WebSocketを第一候補、SSEを代替候補 |
+| リアルタイム通信 | 認証付きSSE（250ms間隔のイベント取得、keepalive付き） |
 | タスクキュー | Redis系キューまたは同等の永続キュー |
 | メタデータDB | PostgreSQLを推奨 |
 | 成果物 | S3互換Object Storage |
@@ -169,7 +169,7 @@ OpenMは、ユーザーごとに隔離されたクラウド開発環境を持ち
 │ Browser                                              │
 │ Project / Task / Chat / Timeline / Diff / Terminal   │
 └──────────────────────────┬───────────────────────────┘
-                           │ HTTPS / WebSocket
+                           │ HTTPS / SSE
 ┌──────────────────────────▼───────────────────────────┐
 │ OpenM Web                                            │
 │ Open WebUI v0.6.5 fork                               │
@@ -432,11 +432,11 @@ options = ClaudeAgentOptions(
 
 | SDKメッセージ | OpenMイベント |
 |---|---|
-| AssistantMessage / TextBlock | `agent.text.delta` |
+| StreamEvent / text_delta | `agent.text.delta` |
 | ToolUseBlock | `agent.tool.requested` |
 | ToolResultBlock | `agent.tool.result` |
 | Permission要求 | `agent.permission.required` |
-| ResultMessage | `agent.completed` |
+| ResultMessage | `agent.message.completed`、`agent.completed` |
 | SDK例外 | `agent.failed` |
 
 ---
@@ -449,25 +449,34 @@ options = ClaudeAgentOptions(
 model_list:
   - model_name: claude-glm-code
     litellm_params:
-      model: zai/glm-5-code
+      model: zai/glm-4.5-flash
       api_key: os.environ/ZAI_API_KEY
+      extra_body:
+        thinking:
+          type: disabled
 
   - model_name: claude-glm-main
     litellm_params:
-      model: zai/glm-5
+      model: zai/glm-4.5-flash
       api_key: os.environ/ZAI_API_KEY
+      extra_body:
+        thinking:
+          type: disabled
 
 litellm_settings:
   drop_params: true
+  redact_user_api_key_info: true
 ```
 
-モデル名は実際のZ.AI契約、提供リージョン、モデル一覧に合わせて確定する。
+v0.1.0では両エイリアスを`zai/glm-4.5-flash`へ固定する。別モデルへ切り替える
+場合は、Z.AI契約、提供リージョン、モデル一覧を確認して
+`config/litellm.yaml`を変更する。
 
 ### 8.2 Agent Runner環境変数
 
 ```text
-ANTHROPIC_BASE_URL=http://litellm:4000
-ANTHROPIC_AUTH_TOKEN=<sandbox-scoped-virtual-key>
+ANTHROPIC_BASE_URL=http://litellm:4000/v1
+ANTHROPIC_AUTH_TOKEN=<OPENM_LITELLM_TOKEN>
 ANTHROPIC_DEFAULT_SONNET_MODEL=claude-glm-code
 ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-glm-main
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
@@ -621,11 +630,15 @@ POST /api/v1/sandbox/stop
 GET  /api/v1/sandbox/usage
 ```
 
-### 10.6 WebSocket
+### 10.6 Server-Sent Events
 
 ```text
-WS /api/v1/tasks/{task_id}/events
+GET /api/v1/openm/tasks/{task_id}/events/stream?after={sequence}
 ```
+
+Bearer認証済みユーザーが所有するタスクだけを購読できる。サーバーは新しいイベントを
+250ms間隔で確認し、SSEの`message`イベントとして送信する。完了状態へ到達すると
+`done`イベントを送り、アイドル中は接続維持用コメントを送る。
 
 共通Envelope:
 

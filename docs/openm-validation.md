@@ -4,7 +4,7 @@ Validated on 2026-07-29 against the development stack:
 
 - Open WebUI base: `v0.6.5`
 - OpenM package version: `0.1.0`
-- Agent mode: deterministic `demo`
+- Agent modes: deterministic `demo` and Claude Agent SDK `live`
 - Browser: headless Chromium
 - Repository: `https://github.com/Sunwood-ai-labs/openm.git`
 
@@ -77,3 +77,22 @@ completes, and OpenM-specific markup was formatted and browser-tested.
 - The Changes inspector displayed hard-coded zero values.
 
 These fixes are included in the public `main` branch.
+
+## Live runtime and response rendering
+
+The Claude Agent SDK `live` path was also exercised against GLM through
+LiteLLM:
+
+1. Submitted a task that created `docs/openm-demo.md` with the Write tool.
+2. Confirmed the Read tool verified the resulting file.
+3. Confirmed the UI reported one changed file and displayed the new-file diff.
+4. Observed 47 response updates before completion; the visible response grew
+   incrementally instead of appearing only after the task finished.
+5. Confirmed the final response produced one `h2`, four `strong` elements,
+   one unordered list, and four list items.
+6. Confirmed raw `##` and `**` markers were absent from rendered text.
+7. Confirmed no horizontal overflow at 390×844.
+
+The live write task completed in 28 seconds with two tool calls. These checks
+cover the OpenM task surface only; they do not generalize to every inherited
+Open WebUI route.
