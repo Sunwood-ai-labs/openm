@@ -69,7 +69,12 @@
 	$: resultEvent = [...events]
 		.reverse()
 		.find((event) => ['agent.message.completed', 'agent.completed', 'agent.failed'].includes(event.type));
-	$: currentAction = getCurrentAction();
+	$: currentAction = getCurrentAction(
+		selectedTask,
+		pendingPermissions,
+		activityEvents,
+		resultEvent
+	);
 
 	const token = () => localStorage.token ?? '';
 
@@ -356,12 +361,17 @@
 		return '';
 	};
 
-	const getCurrentAction = () => {
-		if (!selectedTask) return '';
-		if (pendingPermissions.length) return `${pendingPermissions[0].tool_name} の実行許可を待っています`;
-		if (selectedTask.status === 'succeeded') return '実装と検証が完了しました';
-		if (selectedTask.status === 'failed') return eventDetail(resultEvent) || '実行中に問題が発生しました';
-		const latest = [...activityEvents]
+	const getCurrentAction = (
+		task: OpenMTask | null,
+		pending: OpenMPermission[],
+		activities: OpenMEvent[],
+		result: OpenMEvent | undefined
+	) => {
+		if (!task) return '';
+		if (pending.length) return `${pending[0].tool_name} の実行許可を待っています`;
+		if (task.status === 'succeeded') return 'Claude Codeの実行が完了しました';
+		if (task.status === 'failed') return eventDetail(result) || '実行中に問題が発生しました';
+		const latest = [...activities]
 			.reverse()
 			.find((event) => !['task.status.changed', 'agent.diff.updated'].includes(event.type));
 		return latest ? eventLabel(latest) : 'エージェントを起動しています';
