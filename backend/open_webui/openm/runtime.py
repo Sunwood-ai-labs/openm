@@ -269,6 +269,7 @@ class OpenMTaskExecutor:
                 "parent_tool_use_id": None,
             }
 
+        stream_message_id: str | None = None
         async for message in query(prompt=prompt_stream(), options=options):
             if isinstance(message, SystemMessage):
                 session_id = message.data.get("session_id")
@@ -277,6 +278,9 @@ class OpenMTaskExecutor:
 
             if isinstance(message, StreamEvent):
                 stream_event = message.event
+                if stream_event.get("type") == "message_start":
+                    stream_message = stream_event.get("message", {})
+                    stream_message_id = stream_message.get("id") or message.uuid
                 delta = stream_event.get("delta", {})
                 if (
                     stream_event.get("type") == "content_block_delta"
@@ -290,7 +294,8 @@ class OpenMTaskExecutor:
                         {
                             "text": delta["text"],
                             "partial": True,
-                            "message_id": message.uuid,
+                            "message_id": stream_message_id or message.uuid,
+                            "block_index": stream_event.get("index"),
                         },
                     )
 
