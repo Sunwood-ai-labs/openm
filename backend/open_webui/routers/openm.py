@@ -1,10 +1,13 @@
 """Authenticated OpenM project, task, event, and permission APIs."""
 
+import asyncio
+import json
 import re
 from collections import Counter
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
@@ -380,6 +383,65 @@ def list_task_events(
             .all()
         )
         return [_event_model(event) for event in events]
+
+
+@router.get("/tasks/{task_id}/events/stream")
+async def stream_task_events(
+    request: Request,
+    task_id: str,
+    after: int = Query(default=0, ge=0),
+    user=Depends(get_verified_user),
+):
+    with get_db() as db:
+        _task_or_404(db, task_id, user.id)
+
+    async def event_stream():
+        cursor = after
+        idle_ticks = 0
+        while not await request.is_disconnected():
+            with get_db() as db:
+                task = _task_or_404(db, task_id, user.id)
+                task_status = task.status
+                task_events = (
+                    db.query(OpenMTaskEvent)
+                    .filter(
+                        OpenMTaskEvent.task_id == task_id,
+                        OpenMTaskEvent.user_id == user.id,
+                        OpenMTaskEvent.sequence > cursor,
+                    )
+                    .order_by(OpenMTaskEvent.sequence.asc())
+                    .all()
+                )
+                payloads = [
+                    _event_model(event).model_dump(mode="json") for event in task_events
+                ]
+
+            if payloads:
+                idle_ticks = 0
+                for payload in payloads:
+                    cursor = max(cursor, int(payload["sequence"]))
+                    yield f"event: message\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                idle_ticks += 1
+
+            if task_status in TERMINAL_STATUSES and not payloads:
+                yield f"event: done\ndata: {json.dumps({'status': task_status})}\n\n"
+                return
+
+            if idle_ticks >= 20:
+                idle_ticks = 0
+                yield ": keepalive\n\n"
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

@@ -137,6 +137,53 @@ export const resumeOpenMTask = (token: string, taskId: string) =>
 export const getOpenMEvents = (token: string, taskId: string, after = 0) =>
 	request<OpenMEvent[]>(token, `/tasks/${taskId}/events?after=${after}`);
 
+export const streamOpenMEvents = async (
+	token: string,
+	taskId: string,
+	after: number,
+	onEvent: (event: OpenMEvent) => void,
+	signal: AbortSignal
+) => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/openm/tasks/${taskId}/events/stream?after=${after}`,
+		{
+			headers: {
+				Accept: 'text/event-stream',
+				authorization: `Bearer ${token}`
+			},
+			signal
+		}
+	);
+	if (!response.ok || !response.body) {
+		throw new Error(`OpenM event stream failed (${response.status})`);
+	}
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	while (!signal.aborted) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		buffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+		const frames = buffer.split('\n\n');
+		buffer = frames.pop() ?? '';
+		for (const frame of frames) {
+			const eventType = frame
+				.split('\n')
+				.find((line) => line.startsWith('event:'))
+				?.slice(6)
+				.trim();
+			if (eventType !== 'message') continue;
+			const data = frame
+				.split('\n')
+				.filter((line) => line.startsWith('data:'))
+				.map((line) => line.slice(5).trimStart())
+				.join('\n');
+			if (data) onEvent(JSON.parse(data) as OpenMEvent);
+		}
+	}
+};
+
 export const getOpenMPermissions = (token: string, taskId: string) =>
 	request<OpenMPermission[]>(token, `/tasks/${taskId}/permissions`);
 

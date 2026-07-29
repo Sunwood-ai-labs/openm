@@ -13,6 +13,7 @@
 		getOpenMProjects,
 		getOpenMTasks,
 		resumeOpenMTask,
+		streamOpenMEvents,
 		type OpenMDashboard,
 		type OpenMEvent,
 		type OpenMPermission,
@@ -40,6 +41,9 @@
 	let inspectorTab: 'changes' | 'terminal' | 'context' = 'changes';
 	let composer: HTMLTextAreaElement;
 	let messages: HTMLDivElement;
+	let eventStreamAbort: AbortController | null = null;
+	let streamedTaskId = '';
+	let streamRetryTimer: number | null = null;
 
 	type PlanItem = {
 		content: string;
@@ -81,6 +85,8 @@
 					)
 			: undefined);
 	$: finalResponse = eventDetail(finalResponseEvent).trim();
+	$: liveResponse = getLiveResponse(events);
+	$: displayedResponse = finalResponse || liveResponse;
 	$: currentAction = getCurrentAction(
 		selectedTask,
 		pendingPermissions,
@@ -90,6 +96,61 @@
 
 	const token = () => localStorage.token ?? '';
 
+	const mergeEvents = (current: OpenMEvent[], incoming: OpenMEvent[]) => {
+		const merged = new Map(current.map((event) => [event.id, event]));
+		incoming.forEach((event) => merged.set(event.id, event));
+		return [...merged.values()].sort((left, right) => left.sequence - right.sequence);
+	};
+
+	const applyStreamEvent = async (event: OpenMEvent) => {
+		if (event.task_id !== selectedTaskId) return;
+		const shouldFollow =
+			messages &&
+			messages.scrollHeight - messages.scrollTop - messages.clientHeight < 180;
+		events = mergeEvents(events, [event]);
+		if (event.type === 'task.status.changed' && typeof event.data.to === 'string') {
+			tasks = tasks.map((task) =>
+				task.id === event.task_id
+					? { ...task, status: String(event.data.to), updated_at: event.timestamp }
+					: task
+			);
+		}
+		if (event.type === 'agent.permission.required') {
+			permissions = await getOpenMPermissions(token(), event.task_id).catch(() => permissions);
+		}
+		if (shouldFollow) {
+			await tick();
+			messages?.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+		}
+	};
+
+	const startEventStream = (taskId: string) => {
+		if (!taskId || streamedTaskId === taskId) return;
+		eventStreamAbort?.abort();
+		if (streamRetryTimer !== null) window.clearTimeout(streamRetryTimer);
+		const controller = new AbortController();
+		eventStreamAbort = controller;
+		streamedTaskId = taskId;
+		const after = events.reduce((highest, event) => Math.max(highest, event.sequence), 0);
+		void streamOpenMEvents(token(), taskId, after, applyStreamEvent, controller.signal)
+			.catch((error) => {
+				if (!controller.signal.aborted) console.warn('OpenM event stream disconnected', error);
+			})
+			.finally(() => {
+				if (eventStreamAbort === controller) eventStreamAbort = null;
+				if (streamedTaskId === taskId) streamedTaskId = '';
+				const task = tasks.find((candidate) => candidate.id === taskId);
+				if (
+					!controller.signal.aborted &&
+					selectedTaskId === taskId &&
+					task &&
+					!['cancelled', 'succeeded', 'failed', 'timed_out'].includes(task.status)
+				) {
+					streamRetryTimer = window.setTimeout(() => startEventStream(taskId), 1000);
+				}
+			});
+	};
+
 	const refreshDetails = async () => {
 		if (!selectedTaskId) {
 			events = [];
@@ -97,13 +158,14 @@
 			return;
 		}
 		try {
-			[events, permissions] = await Promise.all([
+			const [nextEvents, nextPermissions] = await Promise.all([
 				getOpenMEvents(token(), selectedTaskId),
 				getOpenMPermissions(token(), selectedTaskId)
 			]);
+			events = mergeEvents(events, nextEvents);
+			permissions = nextPermissions;
 		} catch {
-			events = [];
-			permissions = [];
+			// Keep streamed events visible through a transient refresh failure.
 		}
 	};
 
@@ -125,6 +187,9 @@
 					tasks.find((task) => task.project_id === selectedProjectId)?.id ?? tasks[0]?.id ?? '';
 			}
 			await refreshDetails();
+			if (selectedTaskId && streamedTaskId !== selectedTaskId) {
+				startEventStream(selectedTaskId);
+			}
 		} catch (error) {
 			if (!quiet) toast.error(error instanceof Error ? error.message : 'OpenMを読み込めませんでした');
 		} finally {
@@ -135,25 +200,41 @@
 	onMount(() => {
 		refresh();
 		const interval = window.setInterval(() => refresh(true), 2500);
-		return () => window.clearInterval(interval);
+		return () => {
+			window.clearInterval(interval);
+			if (streamRetryTimer !== null) window.clearTimeout(streamRetryTimer);
+			eventStreamAbort?.abort();
+		};
 	});
 
 	const selectProject = async (projectId: string) => {
+		eventStreamAbort?.abort();
+		streamedTaskId = '';
 		selectedProjectId = projectId;
 		selectedTaskId = tasks.find((task) => task.project_id === projectId)?.id ?? '';
+		events = [];
+		permissions = [];
 		showThreads = false;
 		await refreshDetails();
+		if (selectedTaskId) startEventStream(selectedTaskId);
 	};
 
 	const selectTask = async (taskId: string) => {
+		eventStreamAbort?.abort();
+		streamedTaskId = '';
 		selectedTaskId = taskId;
+		events = [];
+		permissions = [];
 		showThreads = false;
 		await refreshDetails();
+		startEventStream(taskId);
 		await tick();
 		messages?.scrollTo({ top: 0, behavior: 'smooth' });
 	};
 
 	const startNewTask = async () => {
+		eventStreamAbort?.abort();
+		streamedTaskId = '';
 		selectedTaskId = '';
 		events = [];
 		permissions = [];
@@ -179,6 +260,10 @@
 				model: taskModel
 			});
 			prompt = '';
+			eventStreamAbort?.abort();
+			streamedTaskId = '';
+			events = [];
+			permissions = [];
 			selectedTaskId = task.id;
 			await refresh();
 			await tick();
@@ -228,6 +313,8 @@
 		if (!selectedTask) return;
 		try {
 			await resumeOpenMTask(token(), selectedTask.id);
+			eventStreamAbort?.abort();
+			streamedTaskId = '';
 			await refresh();
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : '再開できませんでした');
@@ -381,6 +468,21 @@
 		if (typeof event.data.path === 'string') return event.data.path;
 		if (typeof event.data.output === 'string') return event.data.output;
 		return '';
+	};
+
+	const getLiveResponse = (taskEvents: OpenMEvent[]) => {
+		const partials = taskEvents.filter(
+			(event) =>
+				event.type === 'agent.text.delta' &&
+				event.data.partial === true &&
+				typeof event.data.message_id === 'string'
+		);
+		const messageId = partials.at(-1)?.data.message_id;
+		if (!messageId) return '';
+		return partials
+			.filter((event) => event.data.message_id === messageId)
+			.map((event) => (typeof event.data.text === 'string' ? event.data.text : ''))
+			.join('');
 	};
 
 	const getCurrentAction = (
@@ -629,13 +731,13 @@
 									</details>
 								{/if}
 
-								{#if finalResponse}
-									<section class="final-response">
+								{#if displayedResponse}
+									<section class:streaming={!finalResponse} class="final-response">
 										<div class="response-label">
 											<span></span>
-											<strong>回答</strong>
+											<strong>{finalResponse ? '回答' : 'Claude Codeが入力中'}</strong>
 										</div>
-										<p>{finalResponse}</p>
+										<p>{displayedResponse}{#if !finalResponse}<i class="text-cursor"></i>{/if}</p>
 									</section>
 								{/if}
 
@@ -898,6 +1000,8 @@
 	.response-label span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 	.response-label strong { font-size: 10px; letter-spacing: .04em; }
 	.final-response p { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
+	.final-response.streaming .response-label span { animation: breathe 1.2s ease-in-out infinite; }
+	.text-cursor { display: inline-block; width: 2px; height: 1em; margin-left: 3px; vertical-align: -.12em; background: var(--accent); animation: pulse .75s steps(1) infinite; }
 	.result-card { padding: 16px; }
 	.result-head { display: flex; gap: 10px; align-items: center; }
 	.success-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #182006; font-weight: 800; }

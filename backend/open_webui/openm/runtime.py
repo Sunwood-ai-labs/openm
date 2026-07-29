@@ -193,6 +193,7 @@ class OpenMTaskExecutor:
             PermissionResultAllow,
             PermissionResultDeny,
             ResultMessage,
+            StreamEvent,
             SystemMessage,
             TextBlock,
             ToolResultBlock,
@@ -248,6 +249,7 @@ class OpenMTaskExecutor:
             max_turns=task.max_turns,
             max_budget_usd=task.max_budget,
             enable_file_checkpointing=True,
+            include_partial_messages=True,
             env={
                 "ANTHROPIC_BASE_URL": OPENM_LITELLM_BASE_URL,
                 "ANTHROPIC_AUTH_TOKEN": OPENM_LITELLM_TOKEN,
@@ -272,6 +274,25 @@ class OpenMTaskExecutor:
                 session_id = message.data.get("session_id")
                 if session_id:
                     self._set_session(task_id, user_id, session_id)
+
+            if isinstance(message, StreamEvent):
+                stream_event = message.event
+                delta = stream_event.get("delta", {})
+                if (
+                    stream_event.get("type") == "content_block_delta"
+                    and delta.get("type") == "text_delta"
+                    and delta.get("text")
+                ):
+                    self._append_event(
+                        task_id,
+                        user_id,
+                        "agent.text.delta",
+                        {
+                            "text": delta["text"],
+                            "partial": True,
+                            "message_id": message.uuid,
+                        },
+                    )
 
             if isinstance(message, AssistantMessage):
                 for block in message.content:
