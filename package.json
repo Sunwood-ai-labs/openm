@@ -18,6 +18,7 @@
 		"i18n:parse": "i18next --config i18next-parser.config.ts && prettier --write \"src/lib/i18n/**/*.{js,json}\"",
 		"cy:open": "cypress open",
 		"test:frontend": "vitest --passWithNoTests",
+		"brand:generate": "node scripts/generate-openm-brand-assets.mjs",
 		"pyodide:fetch": "node scripts/prepare-pyodide.js"
 	},
 	"devDependencies": {
@@ -38,6 +39,7 @@
 		"i18next-parser": "^9.0.1",
 		"postcss": "^8.4.31",
 		"prettier": "^3.3.3",
+		"sharp": "^0.33.5",
 		"prettier-plugin-svelte": "^3.2.6",
 		"sass-embedded": "^1.81.0",
 		"svelte": "^4.2.18",

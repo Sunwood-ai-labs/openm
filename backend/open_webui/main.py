@@ -438,7 +438,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Open WebUI",
+    title="OpenM",
     docs_url="/docs" if ENV == "dev" else None,
     openapi_url="/openapi.json" if ENV == "dev" else None,
     redoc_url=None,
@@ -1437,7 +1437,7 @@ async def get_manifest_json():
         return {
             "name": app.state.WEBUI_NAME,
             "short_name": app.state.WEBUI_NAME,
-            "description": "Open WebUI is an open, extensible, user-friendly interface for AI that adapts to your workflow.",
+            "description": "OpenM is a self-hosted AI coding workspace with live agent execution.",
             "start_url": "/",
             "display": "standalone",
             "background_color": "#343541",
@@ -1446,13 +1446,13 @@ async def get_manifest_json():
                 {
                     "src": "/static/logo.png",
                     "type": "image/png",
-                    "sizes": "500x500",
+                    "sizes": "512x512",
                     "purpose": "any",
                 },
                 {
                     "src": "/static/logo.png",
                     "type": "image/png",
-                    "sizes": "500x500",
+                    "sizes": "512x512",
                     "purpose": "maskable",
                 },
             ],

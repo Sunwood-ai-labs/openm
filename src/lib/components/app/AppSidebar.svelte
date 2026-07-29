@@ -25,9 +25,9 @@
 				}}
 			>
 				<img
-					src="/static/splash.png"
-					class="size-11 dark:invert p-0.5"
-					alt="logo"
+					src="/static/favicon.svg"
+					class="size-11 rounded-[0.85rem]"
+					alt="OpenM"
 					draggable="false"
 				/>
 			</button>

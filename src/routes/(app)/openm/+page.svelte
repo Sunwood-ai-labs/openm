@@ -529,7 +529,7 @@
 			<button class="icon-button mobile-only" on:click={() => (showThreads = !showThreads)} aria-label="タスク一覧">
 				<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" /></svg>
 			</button>
-			<div class="agent-mark"><span></span><span></span><span></span></div>
+			<img class="agent-mark" src="/static/favicon.svg" alt="" />
 			<div class="title-stack">
 				<strong>OpenM</strong>
 				<span>{selectedProject?.name ?? 'AI coding workspace'}</span>
@@ -604,7 +604,7 @@
 			<div class="messages" bind:this={messages}>
 				{#if !selectedTask}
 					<section class="empty-chat">
-						<div class="empty-mark"><span></span><span></span><span></span></div>
+						<img class="empty-mark" src="/static/favicon.svg" alt="OpenM" />
 						<h1>何を作りますか？</h1>
 						<p>
 							リポジトリを読み、実装し、テストまで進めます。<br />
@@ -639,7 +639,7 @@
 						</article>
 
 						<article class="agent-message">
-							<div class="openm-avatar"><span></span><span></span><span></span></div>
+							<img class="openm-avatar" src="/static/favicon.svg" alt="" />
 							<div class="agent-content">
 								<div class="message-author">
 									<strong>OpenM</strong>
@@ -887,12 +887,7 @@
 	.chat-header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(16px); position: relative; z-index: 30; }
 	.header-left, .header-actions, .header-center { display: flex; align-items: center; }
 	.header-left { gap: 11px; min-width: 220px; }
-	.agent-mark, .empty-mark, .openm-avatar { display: flex; align-items: end; gap: 3px; }
-	.agent-mark { width: 32px; height: 32px; padding: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
-	.agent-mark span, .empty-mark span, .openm-avatar span { width: 4px; background: var(--accent); border-radius: 3px; }
-	.agent-mark span:nth-child(1), .openm-avatar span:nth-child(1) { height: 8px; }
-	.agent-mark span:nth-child(2), .openm-avatar span:nth-child(2) { height: 14px; }
-	.agent-mark span:nth-child(3), .openm-avatar span:nth-child(3) { height: 11px; }
+	.agent-mark { width: 32px; height: 32px; border-radius: 10px; }
 	.title-stack { display: flex; flex-direction: column; line-height: 1.15; }
 	.title-stack strong { font-size: 15px; letter-spacing: -.02em; }
 	.title-stack span { margin-top: 4px; font-size: 10px; color: var(--muted); }
@@ -943,7 +938,7 @@
 	.user-message { margin-bottom: 42px; }
 	.user-avatar, .openm-avatar { width: 34px; height: 34px; border-radius: 10px; }
 	.user-avatar { display: grid; place-items: center; background: var(--bubble); font-size: 8px; font-weight: 800; color: var(--muted); }
-	.openm-avatar { box-sizing: border-box; align-items: end; justify-content: center; padding: 8px; background: var(--text); }
+	.openm-avatar { display: block; object-fit: cover; }
 	.message-author { height: 28px; display: flex; align-items: center; gap: 9px; }
 	.message-author strong { font-size: 13px; }
 	.message-author time, .model-name { color: var(--muted); font-size: 10px; }
@@ -1025,9 +1020,7 @@
 	.view-work { width: 100%; height: 36px; margin-top: 11px; border: 0; border-radius: 8px; background: var(--text); color: var(--bg); display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 10px; font-weight: 700; cursor: pointer; }
 	.view-work svg { width: 14px; }
 	.empty-chat { min-height: calc(100dvh - 210px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 35px 24px; text-align: center; }
-	.empty-mark { height: 49px; align-items: end; gap: 6px; margin-bottom: 23px; }
-	.empty-mark span { width: 8px; }
-	.empty-mark span:nth-child(1) { height: 25px; }.empty-mark span:nth-child(2) { height: 47px; }.empty-mark span:nth-child(3) { height: 34px; }
+	.empty-mark { width: 58px; height: 58px; margin-bottom: 23px; border-radius: 17px; }
 	.empty-chat h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.055em; font-weight: 650; }
 	.empty-chat p { margin: 15px 0 27px; color: var(--muted); font-size: 12px; line-height: 1.7; }
 	.suggestions { width: min(100%, 530px); display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -1116,7 +1109,6 @@
 		.task-meta { margin: 0 0 21px; }
 		.user-message, .agent-message { grid-template-columns: 30px 1fr; gap: 10px; }
 		.user-avatar, .openm-avatar { width: 29px; height: 29px; border-radius: 8px; }
-		.openm-avatar { padding: 7px; }
 		.user-message { margin-bottom: 30px; }
 		.user-message p { font-size: 14px; }
 		.run-card { padding: 14px 13px 12px; }
