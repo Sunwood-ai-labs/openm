@@ -233,12 +233,15 @@ class OpenMTaskExecutor:
                     f"The exact working directory is {worktree}. "
                     "Use paths relative to that directory for every file operation; "
                     "never invent host paths such as /Users/... or C:\\Users\\.... "
+                    "For tasks with multiple meaningful steps, use TodoWrite and keep "
+                    "the plan current as work progresses. Do not create a plan for a "
+                    "trivial one-step request. "
                     "Before reporting that a file was changed, confirm the tool result. "
                     "Finish with a concise summary of actual changes and validation."
                 ),
             },
-            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
-            allowed_tools=["Read", "Glob", "Grep", "Edit", "Write"],
+            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash", "TodoWrite"],
+            allowed_tools=["Read", "Glob", "Grep", "Edit", "Write", "TodoWrite"],
             disallowed_tools=[],
             permission_mode="default",
             can_use_tool=can_use_tool,

@@ -41,8 +41,10 @@
 	let composer: HTMLTextAreaElement;
 	let messages: HTMLDivElement;
 
-	type PhaseState = 'pending' | 'active' | 'complete' | 'attention' | 'failed';
-	type Phase = { label: string; state: PhaseState };
+	type PlanItem = {
+		content: string;
+		status: 'pending' | 'in_progress' | 'completed';
+	};
 
 	$: selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
 	$: selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
@@ -54,18 +56,19 @@
 	$: changedFiles = Array.isArray(diffEvent?.data?.files) ? (diffEvent?.data.files as string[]) : [];
 	$: currentDiff = typeof diffEvent?.data?.diff === 'string' ? diffEvent.data.diff : '';
 	$: terminalEvents = events.filter((event) => event.type === 'agent.terminal.output');
+	$: toolRequests = events.filter((event) => event.type === 'agent.tool.requested');
+	$: toolResults = events.filter((event) => event.type === 'agent.tool.result');
+	$: latestPlanEvent = [...toolRequests]
+		.reverse()
+		.find((event) => String(event.data.tool ?? '') === 'TodoWrite');
+	$: planItems = getPlanItems(latestPlanEvent);
+	$: completedPlanItems = planItems.filter((item) => item.status === 'completed').length;
 	$: activityEvents = events.filter(
 		(event) => !['agent.text.delta', 'agent.message.completed'].includes(event.type)
 	);
 	$: resultEvent = [...events]
 		.reverse()
 		.find((event) => ['agent.message.completed', 'agent.completed', 'agent.failed'].includes(event.type));
-	$: phases = buildPhases(selectedTask, events, pendingPermissions.length > 0);
-	$: progress = selectedTask
-		? selectedTask.status === 'succeeded'
-			? 100
-			: Math.max(8, Math.round((phases.filter((phase) => phase.state === 'complete').length / 6) * 100))
-		: 0;
 	$: currentAction = getCurrentAction();
 
 	const token = () => localStorage.token ?? '';
@@ -256,10 +259,51 @@
 		return `${Math.floor(seconds / 3600)}時間 ${Math.floor((seconds % 3600) / 60)}分`;
 	};
 
+	const toolNameFor = (event: OpenMEvent) => {
+		if (typeof event.data.tool === 'string') return event.data.tool;
+		if (typeof event.data.tool_use_id === 'string') {
+			const request = toolRequests.find(
+				(candidate) => candidate.data.tool_use_id === event.data.tool_use_id
+			);
+			if (typeof request?.data.tool === 'string') return request.data.tool;
+		}
+		return 'ツール';
+	};
+
+	const toolAction = (tool: string, input: Record<string, unknown> | undefined) => {
+		const target =
+			typeof input?.file_path === 'string'
+				? input.file_path
+				: typeof input?.path === 'string'
+					? input.path
+					: typeof input?.pattern === 'string'
+						? input.pattern
+						: '';
+		const labels: Record<string, string> = {
+			Read: target ? `${target} を読む` : 'ファイルを読む',
+			Glob: target ? `${target} を検索` : 'ファイルを検索',
+			Grep: target ? `${target} を検索` : 'コードを検索',
+			Edit: target ? `${target} を編集` : 'ファイルを編集',
+			Write: target ? `${target} を作成` : 'ファイルを作成',
+			Bash: typeof input?.command === 'string' ? `$ ${input.command}` : 'コマンドを実行',
+			TodoWrite: '作業計画を更新'
+		};
+		return labels[tool] ?? `${tool} を使用`;
+	};
+
 	const eventLabel = (event: OpenMEvent) => {
-		if (event.type === 'agent.tool.requested') return `${String(event.data.tool ?? 'ツール')}を使用`;
-		if (event.type === 'agent.tool.running') return `${String(event.data.tool ?? 'ツール')}を実行中`;
-		if (event.type === 'agent.tool.result') return `${String(event.data.tool ?? 'ツール')}が完了`;
+		if (event.type === 'agent.tool.requested') {
+			return toolAction(
+				toolNameFor(event),
+				event.data.input && typeof event.data.input === 'object'
+					? (event.data.input as Record<string, unknown>)
+					: undefined
+			);
+		}
+		if (event.type === 'agent.tool.running') return `${toolNameFor(event)}を実行中`;
+		if (event.type === 'agent.tool.result') {
+			return event.data.is_error ? `${toolNameFor(event)}で問題が発生` : `${toolNameFor(event)}が完了`;
+		}
 		if (event.type === 'agent.file.changed') return `${String(event.data.path ?? 'ファイル')}を変更`;
 		if (event.type === 'agent.diff.updated') return '変更内容を更新';
 		if (event.type === 'agent.terminal.output') return 'コマンドを実行';
@@ -269,6 +313,38 @@
 		if (event.type === 'agent.cancelled') return 'タスクを停止';
 		if (event.type === 'task.status.changed') return statusLabel(String(event.data.to ?? ''));
 		return event.type;
+	};
+
+	const getPlanItems = (event: OpenMEvent | undefined): PlanItem[] => {
+		const input =
+			event?.data.input && typeof event.data.input === 'object'
+				? (event.data.input as Record<string, unknown>)
+				: {};
+		const rawItems = Array.isArray(input.todos)
+			? input.todos
+			: Array.isArray(input.tasks)
+				? input.tasks
+				: [];
+		return rawItems
+			.map((item) => {
+				if (!item || typeof item !== 'object') return null;
+				const value = item as Record<string, unknown>;
+				const content =
+					typeof value.content === 'string'
+						? value.content
+						: typeof value.title === 'string'
+							? value.title
+							: '';
+				const rawStatus = String(value.status ?? 'pending');
+				const status: PlanItem['status'] =
+					rawStatus === 'completed' || rawStatus === 'done'
+						? 'completed'
+						: rawStatus === 'in_progress' || rawStatus === 'active'
+							? 'in_progress'
+							: 'pending';
+				return content ? { content, status } : null;
+			})
+			.filter((item): item is PlanItem => item !== null);
 	};
 
 	const eventDetail = (event: OpenMEvent | undefined) => {
@@ -289,57 +365,6 @@
 			.reverse()
 			.find((event) => !['task.status.changed', 'agent.diff.updated'].includes(event.type));
 		return latest ? eventLabel(latest) : 'エージェントを起動しています';
-	};
-
-	const buildPhases = (
-		task: OpenMTask | null,
-		taskEvents: OpenMEvent[],
-		needsAttention: boolean
-	): Phase[] => {
-		const labels = ['受付', '環境準備', '調査', '実装', '検証', '完了'];
-		if (!task) return labels.map((label) => ({ label, state: 'pending' }));
-		if (task.status === 'succeeded') {
-			return labels.map((label) => ({ label, state: 'complete' }));
-		}
-		const hasTool = (tools: string[]) =>
-			taskEvents.some(
-				(event) =>
-					event.type === 'agent.tool.requested' && tools.includes(String(event.data.tool ?? ''))
-			);
-		const changed = taskEvents.some((event) =>
-			['agent.file.changed', 'agent.diff.updated'].includes(event.type)
-		);
-		const verified =
-			hasTool(['Bash']) || taskEvents.some((event) => event.type === 'agent.terminal.output');
-		const states: PhaseState[] = [
-			['draft', 'queued'].includes(task.status) ? 'active' : 'complete',
-			task.status === 'preparing'
-				? 'active'
-				: ['draft', 'queued'].includes(task.status)
-					? 'pending'
-					: 'complete',
-			hasTool(['Glob', 'Grep', 'Read'])
-				? 'complete'
-				: task.status === 'running'
-					? 'active'
-					: 'pending',
-			changed ? 'complete' : task.status === 'running' ? 'active' : 'pending',
-			task.status === 'failed'
-				? 'failed'
-				: task.status === 'succeeded'
-					? 'complete'
-					: needsAttention
-						? 'attention'
-						: verified
-							? 'active'
-							: 'pending',
-			task.status === 'succeeded'
-				? 'complete'
-				: task.status === 'failed'
-					? 'failed'
-					: 'pending'
-		];
-		return labels.map((label, index) => ({ label, state: states[index] }));
 	};
 
 	const autoGrow = (event: Event) => {
@@ -493,19 +518,35 @@
 												<i></i>{statusLabel(selectedTask.status)}
 											</span>
 											<h2>{currentAction}</h2>
-											<p>{elapsedTime(selectedTask)} · {events.length}件のアクティビティ</p>
+											<p>Claude Codeから届いた実行イベントを表示しています</p>
 										</div>
-										<strong class="progress-number">{progress}<small>%</small></strong>
+										<div class:active-run={['queued', 'preparing', 'running'].includes(selectedTask.status)} class="run-signal">
+											{selectedTask.status === 'succeeded' ? '✓' : selectedTask.status === 'failed' ? '!' : '···'}
+										</div>
 									</div>
-									<div class="progress-track"><span style={`width:${progress}%`}></span></div>
-									<div class="phase-list">
-										{#each phases as phase}
-											<div class="phase phase-{phase.state}">
-												<span>{phase.state === 'complete' ? '✓' : ''}</span>
-												<small>{phase.label}</small>
+									<div class="run-facts">
+										<div><span>経過時間</span><strong>{elapsedTime(selectedTask)}</strong></div>
+										<div><span>ツール実行</span><strong>{toolRequests.length}</strong></div>
+										<div><span>変更ファイル</span><strong>{changedFiles.length}</strong></div>
+										<div>
+											<span>最終更新</span>
+											<strong>{events.length ? relativeTime(events[events.length - 1].timestamp) : '—'}</strong>
+										</div>
+									</div>
+									{#if planItems.length}
+										<div class="adaptive-plan">
+											<div class="plan-heading">
+												<strong>Claude Codeの計画</strong>
+												<span>{completedPlanItems} / {planItems.length}</span>
 											</div>
-										{/each}
-									</div>
+											{#each planItems as item}
+												<div class="plan-item plan-{item.status}">
+													<span>{item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : ''}</span>
+													<strong>{item.content}</strong>
+												</div>
+											{/each}
+										</div>
+									{/if}
 									{#if ['queued', 'preparing', 'running', 'waiting_permission', 'waiting_user'].includes(selectedTask.status)}
 										<button class="text-action danger" on:click={cancelTask}>実行を停止</button>
 									{:else if ['cancelled', 'failed', 'timed_out'].includes(selectedTask.status)}
@@ -768,20 +809,22 @@
 	.run-status.status-waiting_permission i { background: #f3ab3b; }
 	.run-copy h2 { margin: 8px 0 4px; font-size: 15px; line-height: 1.35; }
 	.run-copy p { margin: 0; color: var(--muted); font-size: 10px; }
-	.progress-number { font-size: 31px; font-weight: 500; letter-spacing: -.06em; }
-	.progress-number small { font-size: 11px; color: var(--muted); margin-left: 2px; }
-	.progress-track { height: 3px; margin-top: 17px; background: var(--raised); border-radius: 3px; overflow: hidden; }
-	.progress-track span { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
-	.phase-list { display: grid; grid-template-columns: repeat(6, 1fr); margin-top: 11px; }
-	.phase { display: flex; align-items: center; gap: 4px; color: var(--soft); }
-	.phase span { width: 13px; height: 13px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: 8px; }
-	.phase small { font-size: 8px; }
-	.phase-complete { color: var(--accent-strong); }
-	.phase-complete span { background: var(--accent); border-color: var(--accent); color: #182006; }
-	.phase-active { color: var(--text); font-weight: 700; }
-	.phase-active span { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
-	.phase-attention { color: #c48a29; }
-	.phase-failed { color: #d84d47; }
+	.run-signal { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 10px; background: var(--raised); color: var(--accent-strong); font-weight: 800; letter-spacing: 2px; }
+	.run-signal.active-run { animation: breathe 1.5s ease-in-out infinite; }
+	.run-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 16px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--line); }
+	.run-facts div { min-width: 0; display: flex; flex-direction: column; padding: 9px 10px; background: var(--bg); }
+	.run-facts span { color: var(--muted); font-size: 8px; }
+	.run-facts strong { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+	.adaptive-plan { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+	.plan-heading { display: flex; justify-content: space-between; margin-bottom: 7px; font-size: 9px; }
+	.plan-heading span { color: var(--muted); }
+	.plan-item { display: grid; grid-template-columns: 19px 1fr; align-items: start; gap: 7px; padding: 6px 0; color: var(--muted); }
+	.plan-item > span { width: 17px; height: 17px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: 8px; }
+	.plan-item strong { padding-top: 2px; font-size: 10px; line-height: 1.4; font-weight: 500; }
+	.plan-completed > span { border-color: var(--accent); background: var(--accent); color: #182006; }
+	.plan-completed strong { text-decoration: line-through; color: var(--soft); }
+	.plan-in_progress { color: var(--text); }
+	.plan-in_progress > span { border-color: var(--accent); color: var(--accent-strong); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
 	.text-action { border: 0; background: transparent; color: var(--accent-strong); padding: 12px 0 0; font-size: 10px; cursor: pointer; }
 	.text-action.danger { color: #d84d47; }
 	.activity-card summary { list-style: none; padding: 14px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
@@ -892,6 +935,7 @@
 	.mobile-only, .mobile-scrim { display: none; }
 	@keyframes spin { to { transform: rotate(360deg); } }
 	@keyframes pulse { 50% { opacity: .45; } }
+	@keyframes breathe { 50% { background: color-mix(in srgb, var(--accent) 22%, var(--raised)); transform: scale(.96); } }
 
 	@media (max-width: 960px) {
 		.header-center { display: none; }
@@ -917,9 +961,7 @@
 		.user-message { margin-bottom: 30px; }
 		.user-message p { font-size: 14px; }
 		.run-card { padding: 14px 13px 12px; }
-		.progress-number { font-size: 25px; }
-		.phase-list { grid-template-columns: repeat(3, 1fr); gap: 8px 4px; }
-		.phase small { font-size: 7px; }
+		.run-facts { grid-template-columns: repeat(2, 1fr); }
 		.activity-card summary { padding: 12px; }
 		.activity-list { padding-left: 12px; padding-right: 12px; }
 		.result-facts { grid-template-columns: 1fr; }
