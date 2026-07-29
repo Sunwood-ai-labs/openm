@@ -312,6 +312,13 @@ class OpenMTaskExecutor:
                     self._set_session(task_id, user_id, message.session_id)
                 if message.is_error:
                     raise RuntimeError(message.result or "Agent SDK returned an error")
+                if message.result:
+                    self._append_event(
+                        task_id,
+                        user_id,
+                        "agent.message.completed",
+                        {"text": message.result},
+                    )
                 self._append_diff_event(task_id, user_id, worktree)
                 self._complete_task(
                     task_id,

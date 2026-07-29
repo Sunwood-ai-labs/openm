@@ -69,6 +69,18 @@
 	$: resultEvent = [...events]
 		.reverse()
 		.find((event) => ['agent.message.completed', 'agent.completed', 'agent.failed'].includes(event.type));
+	$: finalResponseEvent =
+		[...events].reverse().find((event) => event.type === 'agent.message.completed') ??
+		(selectedTask?.status === 'succeeded'
+			? [...events]
+					.reverse()
+					.find(
+						(event) =>
+							event.type === 'agent.text.delta' &&
+							eventDetail(event) !== 'ユーザー専用Sandboxを準備しています。'
+					)
+			: undefined);
+	$: finalResponse = eventDetail(finalResponseEvent).trim();
 	$: currentAction = getCurrentAction(
 		selectedTask,
 		pendingPermissions,
@@ -617,13 +629,22 @@
 									</details>
 								{/if}
 
+								{#if finalResponse}
+									<section class="final-response">
+										<div class="response-label">
+											<span></span>
+											<strong>回答</strong>
+										</div>
+										<p>{finalResponse}</p>
+									</section>
+								{/if}
+
 								{#if selectedTask.status === 'succeeded'}
 									<section class="result-card">
 										<div class="result-head">
 											<div class="success-mark">✓</div>
-											<div><span>完了しました</span><strong>{selectedTask.title}</strong></div>
+											<div><span>完了しました</span><strong>タスクを完了しました</strong></div>
 										</div>
-										{#if eventDetail(resultEvent)}<p>{eventDetail(resultEvent)}</p>{/if}
 										<div class="result-facts">
 											<div><span>変更ファイル</span><strong>{changedFiles.length}</strong></div>
 											<div><span>所要時間</span><strong>{elapsedTime(selectedTask)}</strong></div>
@@ -872,6 +893,11 @@
 	.approval-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
 	.approval-actions button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); font-size: 9px; font-weight: 700; cursor: pointer; }
 	.approval-actions .primary { background: var(--text); color: var(--bg); }
+	.final-response { margin-top: 20px; padding: 2px 2px 4px; }
+	.response-label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+	.response-label span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+	.response-label strong { font-size: 10px; letter-spacing: .04em; }
+	.final-response p { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
 	.result-card { padding: 16px; }
 	.result-head { display: flex; gap: 10px; align-items: center; }
 	.success-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #182006; font-weight: 800; }
