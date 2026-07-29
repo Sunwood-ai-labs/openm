@@ -275,8 +275,17 @@
 		return 'ツール';
 	};
 
+	const compactWorkspacePath = (path: string) => {
+		const normalized = path.replaceAll('\\', '/');
+		const marker = '/worktrees/';
+		const markerIndex = normalized.indexOf(marker);
+		if (markerIndex === -1) return normalized;
+		const relativeStart = normalized.indexOf('/', markerIndex + marker.length);
+		return relativeStart === -1 ? normalized : normalized.slice(relativeStart + 1);
+	};
+
 	const toolAction = (tool: string, input: Record<string, unknown> | undefined) => {
-		const target =
+		const rawTarget =
 			typeof input?.file_path === 'string'
 				? input.file_path
 				: typeof input?.path === 'string'
@@ -284,6 +293,7 @@
 					: typeof input?.pattern === 'string'
 						? input.pattern
 						: '';
+		const target = rawTarget ? compactWorkspacePath(rawTarget) : '';
 		const labels: Record<string, string> = {
 			Read: target ? `${target} を読む` : 'ファイルを読む',
 			Glob: target ? `${target} を検索` : 'ファイルを検索',
