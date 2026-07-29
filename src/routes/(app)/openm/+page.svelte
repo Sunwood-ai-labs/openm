@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
 	import {
@@ -27,27 +27,22 @@
 	let permissions: OpenMPermission[] = [];
 	let selectedProjectId = '';
 	let selectedTaskId = '';
+	let prompt = '';
+	let taskModel = 'claude-glm-code';
 	let loading = true;
+	let submitting = false;
 	let showProjectModal = false;
-	let showTaskModal = false;
+	let showThreads = false;
+	let showInspector = false;
 	let projectName = '';
 	let repositoryUrl = '';
 	let defaultBranch = 'main';
-	let taskTitle = '';
-	let taskPrompt = '';
-	let taskModel = 'claude-glm-code';
-	let submitting = false;
-	let activeInspector: 'changes' | 'terminal' | 'context' = 'changes';
-	let activeEventFilter: 'all' | 'agent' | 'tools' | 'files' | 'system' = 'all';
-	const eventFilters: Array<typeof activeEventFilter> = ['all', 'agent', 'tools', 'files', 'system'];
+	let inspectorTab: 'changes' | 'terminal' | 'context' = 'changes';
+	let composer: HTMLTextAreaElement;
+	let messages: HTMLDivElement;
 
 	type PhaseState = 'pending' | 'active' | 'complete' | 'attention' | 'failed';
-	type ProgressPhase = {
-		key: string;
-		label: string;
-		shortLabel: string;
-		state: PhaseState;
-	};
+	type Phase = { label: string; state: PhaseState };
 
 	$: selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
 	$: selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
@@ -55,220 +50,27 @@
 		? tasks.filter((task) => task.project_id === selectedProjectId)
 		: tasks;
 	$: pendingPermissions = permissions.filter((permission) => permission.status === 'pending');
-	$: latestDiffEvent = [...events].reverse().find((event) => event.type === 'agent.diff.updated');
-	$: changedFiles = Array.isArray(latestDiffEvent?.data?.files)
-		? (latestDiffEvent?.data.files as string[])
-		: [];
-	$: currentDiff = typeof latestDiffEvent?.data?.diff === 'string' ? latestDiffEvent.data.diff : '';
-	$: additions = currentDiff
-		.split('\n')
-		.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
-	$: deletions = currentDiff
-		.split('\n')
-		.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+	$: diffEvent = [...events].reverse().find((event) => event.type === 'agent.diff.updated');
+	$: changedFiles = Array.isArray(diffEvent?.data?.files) ? (diffEvent?.data.files as string[]) : [];
+	$: currentDiff = typeof diffEvent?.data?.diff === 'string' ? diffEvent.data.diff : '';
 	$: terminalEvents = events.filter((event) => event.type === 'agent.terminal.output');
-	$: currentAttemptEvents = currentAttempt(events);
-	$: progressPhases = buildProgressPhases(
-		selectedTask,
-		currentAttemptEvents,
-		pendingPermissions.length > 0
+	$: activityEvents = events.filter(
+		(event) => !['agent.text.delta', 'agent.message.completed'].includes(event.type)
 	);
-	$: completedPhaseCount = progressPhases.filter((phase) => phase.state === 'complete').length;
-	$: progressPercent = selectedTask
+	$: resultEvent = [...events]
+		.reverse()
+		.find((event) => ['agent.message.completed', 'agent.completed', 'agent.failed'].includes(event.type));
+	$: phases = buildPhases(selectedTask, events, pendingPermissions.length > 0);
+	$: progress = selectedTask
 		? selectedTask.status === 'succeeded'
 			? 100
-			: Math.max(8, Math.round((completedPhaseCount / progressPhases.length) * 100))
+			: Math.max(8, Math.round((phases.filter((phase) => phase.state === 'complete').length / 6) * 100))
 		: 0;
-	$: activePhase =
-		progressPhases.find((phase) => ['active', 'attention', 'failed'].includes(phase.state)) ??
-		progressPhases.at(-1);
-	$: latestMeaningfulEvent = [...currentAttemptEvents]
-		.reverse()
-		.find((event) => !['task.status.changed', 'agent.text.delta'].includes(event.type));
-	$: currentAction = pendingPermissions.length
-		? `${pendingPermissions[0].tool_name} の実行許可を待っています`
-		: selectedTask?.status === 'succeeded'
-			? '実装と検証が完了しました'
-			: selectedTask?.status === 'failed'
-				? eventBody(
-						[...events].reverse().find((event) => event.type === 'agent.failed') ??
-							events[events.length - 1]
-					)
-				: latestMeaningfulEvent
-					? eventBody(latestMeaningfulEvent) || eventTitle(latestMeaningfulEvent)
-					: selectedTask
-						? 'エージェントの最初のアクションを待っています'
-						: 'タスクを選択してください';
-	$: filteredEvents = events.filter((event) => {
-		if (activeEventFilter === 'all') return true;
-		if (activeEventFilter === 'agent') {
-			return ['agent.text.delta', 'agent.message.completed', 'agent.completed', 'agent.failed'].includes(
-				event.type
-			);
-		}
-		if (activeEventFilter === 'tools') {
-			return (
-				event.type.includes('tool') ||
-				event.type === 'agent.terminal.output' ||
-				event.type === 'agent.permission.required'
-			);
-		}
-		if (activeEventFilter === 'files') {
-			return event.type === 'agent.file.changed' || event.type === 'agent.diff.updated';
-		}
-		return event.type === 'task.status.changed' || event.type === 'agent.cancelled';
-	});
+	$: currentAction = getCurrentAction();
 
 	const token = () => localStorage.token ?? '';
-	const setEventFilter = (filter: typeof activeEventFilter) => {
-		activeEventFilter = filter;
-	};
 
-	const currentAttempt = (taskEvents: OpenMEvent[]) => {
-		let startIndex = 0;
-		taskEvents.forEach((event, index) => {
-			if (event.type === 'task.status.changed' && event.data?.to === 'queued') {
-				startIndex = index;
-			}
-		});
-		return taskEvents.slice(startIndex);
-	};
-
-	const buildProgressPhases = (
-		task: OpenMTask | null,
-		taskEvents: OpenMEvent[],
-		needsAttention: boolean
-	): ProgressPhase[] => {
-		const phaseDefs = [
-			{ key: 'queue', label: 'Task accepted', shortLabel: 'QUEUED' },
-			{ key: 'sandbox', label: 'Sandbox ready', shortLabel: 'SANDBOX' },
-			{ key: 'inspect', label: 'Codebase inspected', shortLabel: 'INSPECT' },
-			{ key: 'implement', label: 'Changes implemented', shortLabel: 'BUILD' },
-			{ key: 'verify', label: 'Checks verified', shortLabel: 'VERIFY' },
-			{ key: 'deliver', label: 'Ready to review', shortLabel: 'DELIVER' }
-		];
-		if (!task) return phaseDefs.map((phase) => ({ ...phase, state: 'pending' as PhaseState }));
-
-		const has = (types: string[]) => taskEvents.some((event) => types.includes(event.type));
-		const hasInspection = taskEvents.some(
-			(event) =>
-				event.type === 'agent.tool.requested' &&
-				['Glob', 'Grep', 'Read'].includes(String(event.data.tool ?? ''))
-		);
-		const hasImplementation = has(['agent.file.changed', 'agent.diff.updated']);
-		const hasVerification =
-			has(['agent.terminal.output']) ||
-			taskEvents.some(
-				(event) =>
-					event.type === 'agent.tool.requested' &&
-					String(event.data.tool ?? '') === 'Bash'
-			);
-		const terminalFailure = taskEvents.some(
-			(event) =>
-				event.type === 'agent.terminal.output' && Number(event.data.exit_code ?? 0) !== 0
-		);
-		const states: PhaseState[] = [
-			['queued', 'draft'].includes(task.status) ? 'active' : 'complete',
-			task.status === 'preparing'
-				? 'active'
-				: ['queued', 'draft'].includes(task.status)
-					? 'pending'
-					: 'complete',
-			hasInspection
-				? 'complete'
-				: task.status === 'running'
-					? 'active'
-					: ['succeeded', 'failed'].includes(task.status)
-						? 'complete'
-						: 'pending',
-			hasImplementation
-				? 'complete'
-				: hasInspection && task.status === 'running'
-					? 'active'
-					: 'pending',
-			terminalFailure
-				? 'failed'
-				: task.status === 'succeeded'
-					? 'complete'
-					: hasVerification && !needsAttention
-						? 'active'
-						: needsAttention
-							? 'attention'
-							: 'pending',
-			task.status === 'succeeded'
-				? 'complete'
-				: task.status === 'failed'
-					? 'failed'
-					: 'pending'
-		];
-		return phaseDefs.map((phase, index) => ({ ...phase, state: states[index] }));
-	};
-
-	const taskProgress = (task: OpenMTask) =>
-		({
-			draft: 4,
-			queued: 8,
-			preparing: 18,
-			running: 54,
-			waiting_permission: 72,
-			waiting_user: 72,
-			cancelled: 100,
-			succeeded: 100,
-			failed: 100,
-			timed_out: 100
-		})[task.status] ?? 0;
-
-	const elapsedTime = (task: OpenMTask | null) => {
-		if (!task?.started_at) return '—';
-		const end = task.completed_at ?? Math.floor(Date.now() / 1000);
-		const seconds = Math.max(0, end - task.started_at);
-		if (seconds < 60) return `${seconds}s`;
-		if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-		return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-	};
-
-	const eventKind = (event: OpenMEvent) => {
-		if (event.type === 'agent.terminal.output') return 'SHELL';
-		if (event.type.includes('tool')) return 'TOOL';
-		if (event.type.includes('file') || event.type.includes('diff')) return 'CHANGE';
-		if (event.type.includes('permission')) return 'APPROVAL';
-		if (event.type.includes('failed')) return 'ISSUE';
-		if (event.type.includes('completed')) return 'RESULT';
-		if (event.type.startsWith('task.')) return 'STATE';
-		return 'AGENT';
-	};
-
-	const refresh = async (quiet = false) => {
-		try {
-			const [nextDashboard, nextProjects, nextTasks] = await Promise.all([
-				getOpenMDashboard(token()),
-				getOpenMProjects(token()),
-				getOpenMTasks(token())
-			]);
-			dashboard = nextDashboard;
-			projects = nextProjects;
-			tasks = nextTasks;
-
-			if (!selectedProjectId && projects.length) {
-				selectedProjectId = projects[0].id;
-			}
-			if (!projects.some((project) => project.id === selectedProjectId)) {
-				selectedProjectId = projects[0]?.id ?? '';
-			}
-			if (!tasks.some((task) => task.id === selectedTaskId)) {
-				selectedTaskId =
-					tasks.find((task) => task.project_id === selectedProjectId)?.id ?? tasks[0]?.id ?? '';
-			}
-			await refreshTaskDetails();
-		} catch (error) {
-			if (!quiet)
-				toast.error(error instanceof Error ? error.message : 'OpenMを読み込めませんでした');
-		} finally {
-			loading = false;
-		}
-	};
-
-	const refreshTaskDetails = async () => {
+	const refreshDetails = async () => {
 		if (!selectedTaskId) {
 			events = [];
 			permissions = [];
@@ -285,25 +87,91 @@
 		}
 	};
 
+	const refresh = async (quiet = false) => {
+		try {
+			const [nextDashboard, nextProjects, nextTasks] = await Promise.all([
+				getOpenMDashboard(token()),
+				getOpenMProjects(token()),
+				getOpenMTasks(token())
+			]);
+			dashboard = nextDashboard;
+			projects = nextProjects;
+			tasks = nextTasks;
+			if (!projects.some((project) => project.id === selectedProjectId)) {
+				selectedProjectId = projects[0]?.id ?? '';
+			}
+			if (!tasks.some((task) => task.id === selectedTaskId)) {
+				selectedTaskId =
+					tasks.find((task) => task.project_id === selectedProjectId)?.id ?? tasks[0]?.id ?? '';
+			}
+			await refreshDetails();
+		} catch (error) {
+			if (!quiet) toast.error(error instanceof Error ? error.message : 'OpenMを読み込めませんでした');
+		} finally {
+			loading = false;
+		}
+	};
+
 	onMount(() => {
 		refresh();
 		const interval = window.setInterval(() => refresh(true), 2500);
 		return () => window.clearInterval(interval);
 	});
 
-	const selectProject = (projectId: string) => {
+	const selectProject = async (projectId: string) => {
 		selectedProjectId = projectId;
 		selectedTaskId = tasks.find((task) => task.project_id === projectId)?.id ?? '';
-		refreshTaskDetails();
+		showThreads = false;
+		await refreshDetails();
 	};
 
-	const selectTask = (taskId: string) => {
+	const selectTask = async (taskId: string) => {
 		selectedTaskId = taskId;
-		refreshTaskDetails();
+		showThreads = false;
+		await refreshDetails();
+		await tick();
+		messages?.scrollTo({ top: 0, behavior: 'smooth' });
+	};
+
+	const startNewTask = async () => {
+		selectedTaskId = '';
+		events = [];
+		permissions = [];
+		showThreads = false;
+		await tick();
+		composer?.focus();
+	};
+
+	const submitTask = async () => {
+		const cleanPrompt = prompt.trim();
+		if (!selectedProjectId) {
+			showProjectModal = true;
+			return;
+		}
+		if (!cleanPrompt || submitting) return;
+		submitting = true;
+		try {
+			const firstLine = cleanPrompt.split('\n')[0].replace(/^#+\s*/, '');
+			const task = await createOpenMTask(token(), {
+				project_id: selectedProjectId,
+				title: firstLine.slice(0, 64) || '新しいタスク',
+				prompt: cleanPrompt,
+				model: taskModel
+			});
+			prompt = '';
+			selectedTaskId = task.id;
+			await refresh();
+			await tick();
+			messages?.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'タスクを開始できませんでした');
+		} finally {
+			submitting = false;
+		}
 	};
 
 	const submitProject = async () => {
-		if (!projectName.trim() || !repositoryUrl.trim()) return;
+		if (!projectName.trim() || !repositoryUrl.trim() || submitting) return;
 		submitting = true;
 		try {
 			const project = await createOpenMProject(token(), {
@@ -311,38 +179,16 @@
 				repository_url: repositoryUrl.trim(),
 				default_branch: defaultBranch.trim() || 'main'
 			});
+			selectedProjectId = project.id;
 			showProjectModal = false;
 			projectName = '';
 			repositoryUrl = '';
 			defaultBranch = 'main';
-			selectedProjectId = project.id;
 			await refresh();
-			toast.success('プロジェクトを接続しました');
+			await tick();
+			composer?.focus();
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : 'プロジェクトを作成できませんでした');
-		} finally {
-			submitting = false;
-		}
-	};
-
-	const submitTask = async () => {
-		if (!selectedProjectId || !taskTitle.trim() || !taskPrompt.trim()) return;
-		submitting = true;
-		try {
-			const task = await createOpenMTask(token(), {
-				project_id: selectedProjectId,
-				title: taskTitle.trim(),
-				prompt: taskPrompt.trim(),
-				model: taskModel
-			});
-			showTaskModal = false;
-			taskTitle = '';
-			taskPrompt = '';
-			selectedTaskId = task.id;
-			await refresh();
-			toast.success('エージェントへタスクを渡しました');
-		} catch (error) {
-			toast.error(error instanceof Error ? error.message : 'タスクを作成できませんでした');
+			toast.error(error instanceof Error ? error.message : 'プロジェクトを接続できませんでした');
 		} finally {
 			submitting = false;
 		}
@@ -353,7 +199,6 @@
 		try {
 			await cancelOpenMTask(token(), selectedTask.id);
 			await refresh();
-			toast.success('タスクを停止しました');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : '停止できませんでした');
 		}
@@ -364,7 +209,6 @@
 		try {
 			await resumeOpenMTask(token(), selectedTask.id);
 			await refresh();
-			toast.success('タスクを再開しました');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : '再開できませんでした');
 		}
@@ -377,7 +221,6 @@
 		try {
 			await decideOpenMPermission(token(), permission.task_id, permission.id, decision);
 			await refresh();
-			toast.success(decision === 'deny' ? '操作を拒否しました' : '操作を許可しました');
 		} catch (error) {
 			toast.error(error instanceof Error ? error.message : '判断を保存できませんでした');
 		}
@@ -387,9 +230,9 @@
 		({
 			draft: '下書き',
 			queued: '待機中',
-			preparing: '準備中',
-			running: '実行中',
-			waiting_permission: '許可待ち',
+			preparing: '環境を準備中',
+			running: '作業中',
+			waiting_permission: '承認待ち',
 			waiting_user: '入力待ち',
 			cancelled: '停止済み',
 			succeeded: '完了',
@@ -399,2520 +242,694 @@
 
 	const relativeTime = (unix: number) => {
 		const seconds = Math.max(0, Math.floor(Date.now() / 1000 - unix));
-		if (seconds < 60) return `${seconds}秒前`;
+		if (seconds < 60) return 'たった今';
 		if (seconds < 3600) return `${Math.floor(seconds / 60)}分前`;
 		if (seconds < 86400) return `${Math.floor(seconds / 3600)}時間前`;
 		return `${Math.floor(seconds / 86400)}日前`;
 	};
 
-	const eventTitle = (event: OpenMEvent) => {
-		const titles: Record<string, string> = {
-			'task.status.changed': 'タスク状態を更新',
-			'agent.text.delta': 'エージェント',
-			'agent.message.completed': '応答を完了',
-			'agent.tool.requested': 'ツールを要求',
-			'agent.tool.running': 'ツールを実行',
-			'agent.tool.result': 'ツール実行結果',
-			'agent.permission.required': '操作許可が必要',
-			'agent.file.changed': 'ファイルを変更',
-			'agent.diff.updated': '差分を更新',
-			'agent.terminal.output': 'ターミナル',
-			'agent.completed': 'タスク完了',
-			'agent.failed': 'タスク失敗',
-			'agent.cancelled': 'タスク停止'
-		};
-		return titles[event.type] ?? event.type;
+	const elapsedTime = (task: OpenMTask | null) => {
+		if (!task?.started_at) return '—';
+		const seconds = Math.max(0, (task.completed_at ?? Math.floor(Date.now() / 1000)) - task.started_at);
+		if (seconds < 60) return `${seconds}秒`;
+		if (seconds < 3600) return `${Math.floor(seconds / 60)}分 ${seconds % 60}秒`;
+		return `${Math.floor(seconds / 3600)}時間 ${Math.floor((seconds % 3600) / 60)}分`;
 	};
 
-	const eventBody = (event: OpenMEvent | undefined) => {
+	const eventLabel = (event: OpenMEvent) => {
+		if (event.type === 'agent.tool.requested') return `${String(event.data.tool ?? 'ツール')}を使用`;
+		if (event.type === 'agent.tool.running') return `${String(event.data.tool ?? 'ツール')}を実行中`;
+		if (event.type === 'agent.tool.result') return `${String(event.data.tool ?? 'ツール')}が完了`;
+		if (event.type === 'agent.file.changed') return `${String(event.data.path ?? 'ファイル')}を変更`;
+		if (event.type === 'agent.diff.updated') return '変更内容を更新';
+		if (event.type === 'agent.terminal.output') return 'コマンドを実行';
+		if (event.type === 'agent.permission.required') return '操作の承認が必要';
+		if (event.type === 'agent.completed') return 'タスクを完了';
+		if (event.type === 'agent.failed') return 'タスクで問題が発生';
+		if (event.type === 'agent.cancelled') return 'タスクを停止';
+		if (event.type === 'task.status.changed') return statusLabel(String(event.data.to ?? ''));
+		return event.type;
+	};
+
+	const eventDetail = (event: OpenMEvent | undefined) => {
 		if (!event) return '';
-		const data = event.data;
-		if (typeof data.text === 'string') return data.text;
-		if (typeof data.command === 'string') return `$ ${data.command}`;
-		if (typeof data.path === 'string') return data.path;
-		if (typeof data.to === 'string') return `${data.from ?? '—'} → ${data.to}`;
-		return Object.keys(data).length ? JSON.stringify(data, null, 2) : '';
+		if (typeof event.data.text === 'string') return event.data.text;
+		if (typeof event.data.command === 'string') return `$ ${event.data.command}`;
+		if (typeof event.data.path === 'string') return event.data.path;
+		if (typeof event.data.output === 'string') return event.data.output;
+		return '';
+	};
+
+	const getCurrentAction = () => {
+		if (!selectedTask) return '';
+		if (pendingPermissions.length) return `${pendingPermissions[0].tool_name} の実行許可を待っています`;
+		if (selectedTask.status === 'succeeded') return '実装と検証が完了しました';
+		if (selectedTask.status === 'failed') return eventDetail(resultEvent) || '実行中に問題が発生しました';
+		const latest = [...activityEvents]
+			.reverse()
+			.find((event) => !['task.status.changed', 'agent.diff.updated'].includes(event.type));
+		return latest ? eventLabel(latest) : 'エージェントを起動しています';
+	};
+
+	const buildPhases = (
+		task: OpenMTask | null,
+		taskEvents: OpenMEvent[],
+		needsAttention: boolean
+	): Phase[] => {
+		const labels = ['受付', '環境準備', '調査', '実装', '検証', '完了'];
+		if (!task) return labels.map((label) => ({ label, state: 'pending' }));
+		const hasTool = (tools: string[]) =>
+			taskEvents.some(
+				(event) =>
+					event.type === 'agent.tool.requested' && tools.includes(String(event.data.tool ?? ''))
+			);
+		const changed = taskEvents.some((event) =>
+			['agent.file.changed', 'agent.diff.updated'].includes(event.type)
+		);
+		const verified =
+			hasTool(['Bash']) || taskEvents.some((event) => event.type === 'agent.terminal.output');
+		const states: PhaseState[] = [
+			['draft', 'queued'].includes(task.status) ? 'active' : 'complete',
+			task.status === 'preparing'
+				? 'active'
+				: ['draft', 'queued'].includes(task.status)
+					? 'pending'
+					: 'complete',
+			hasTool(['Glob', 'Grep', 'Read'])
+				? 'complete'
+				: task.status === 'running'
+					? 'active'
+					: 'pending',
+			changed ? 'complete' : task.status === 'running' ? 'active' : 'pending',
+			task.status === 'failed'
+				? 'failed'
+				: task.status === 'succeeded'
+					? 'complete'
+					: needsAttention
+						? 'attention'
+						: verified
+							? 'active'
+							: 'pending',
+			task.status === 'succeeded'
+				? 'complete'
+				: task.status === 'failed'
+					? 'failed'
+					: 'pending'
+		];
+		return labels.map((label, index) => ({ label, state: states[index] }));
+	};
+
+	const autoGrow = (event: Event) => {
+		const element = event.currentTarget as HTMLTextAreaElement;
+		element.style.height = 'auto';
+		element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
 	};
 </script>
 
 <svelte:head>
-	<title>OpenM — Agent Workspace</title>
+	<title>OpenM — AI coding workspace</title>
 </svelte:head>
 
 <svelte:window
 	on:keydown={(event) => {
 		if (event.key === 'Escape') {
 			showProjectModal = false;
-			showTaskModal = false;
+			showThreads = false;
+			showInspector = false;
 		}
 	}}
 />
 
-<div class="openm-shell">
-	<header class="topbar">
-		<div class="brand">
-			<div class="brand-mark" aria-hidden="true">
-				<span></span><span></span><span></span>
-			</div>
-			<div>
-				<div class="wordmark">OpenM</div>
-				<div class="brand-subtitle">PERSONAL AI WORKSPACE</div>
+<div class="openm-chat">
+	<header class="chat-header">
+		<div class="header-left">
+			<button class="icon-button mobile-only" on:click={() => (showThreads = !showThreads)} aria-label="タスク一覧">
+				<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" /></svg>
+			</button>
+			<div class="agent-mark"><span></span><span></span><span></span></div>
+			<div class="title-stack">
+				<strong>OpenM</strong>
+				<span>{selectedProject?.name ?? 'AI coding workspace'}</span>
 			</div>
 		</div>
-
-		<div class="topbar-center">
-			<div class="environment-pill">
-				<span class="pulse-dot"></span>
-				<span>USER SANDBOX</span>
-				<strong>{dashboard?.sandbox.status ?? 'CONNECTING'}</strong>
-			</div>
-			<div class="divider"></div>
-			<div class="model-pill"><span>MODEL</span><strong>GLM / LiteLLM</strong></div>
+		<div class="header-center">
+			<span class="presence"></span>
+			<span>{dashboard?.sandbox.status === 'ready' ? 'Sandbox ready' : 'Connecting'}</span>
+			<i></i>
+			<span>GLM via LiteLLM</span>
 		</div>
-
-		<div class="topbar-actions">
-			<button class="icon-button" aria-label="Search">
-				<svg viewBox="0 0 24 24"
-					><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg
-				>
+		<div class="header-actions">
+			{#if selectedTask}
+				<button class="artifact-button" on:click={() => (showInspector = !showInspector)}>
+					<svg viewBox="0 0 24 24"><path d="M4 4h16v16H4zM9 4v16" /></svg>
+					<span>{changedFiles.length ? `${changedFiles.length} files` : 'Workspace'}</span>
+				</button>
+			{/if}
+			<button class="new-button" disabled={!selectedProject} on:click={startNewTask}>
+				<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+				<span>新しいタスク</span>
 			</button>
-			<button class="icon-button notification-button" aria-label="Notifications">
-				<svg viewBox="0 0 24 24"
-					><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"
-					></path></svg
-				>
-				{#if dashboard?.waiting_permission}
-					<span class="notification-count">{dashboard.waiting_permission}</span>
-				{/if}
-			</button>
-			<div class="avatar">OM</div>
 		</div>
 	</header>
 
-	<div class="workspace">
-		<aside class="rail">
-			<nav class="rail-nav" aria-label="OpenM navigation">
-				<button class="rail-item active" aria-label="Workspace">
-					<svg viewBox="0 0 24 24"
-						><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"
-						></rect><rect x="3" y="14" width="7" height="7"></rect><rect
-							x="14"
-							y="14"
-							width="7"
-							height="7"
-						></rect></svg
-					>
-					<span>WORKSPACE</span>
-				</button>
-				<button class="rail-item" aria-label="Artifacts">
-					<svg viewBox="0 0 24 24"
-						><path d="m12 3 9 5-9 5-9-5 9-5Z"></path><path d="m3 12 9 5 9-5"></path><path
-							d="m3 16 9 5 9-5"
-						></path></svg
-					>
-					<span>ARTIFACTS</span>
-				</button>
-				<button class="rail-item" aria-label="Usage">
-					<svg viewBox="0 0 24 24"
-						><path d="M4 19V9"></path><path d="M10 19V5"></path><path d="M16 19v-7"></path><path
-							d="M22 19V2"
-						></path></svg
-					>
-					<span>USAGE</span>
-				</button>
-			</nav>
-			<button class="rail-item settings" aria-label="Settings">
-				<svg viewBox="0 0 24 24"
-					><circle cx="12" cy="12" r="3"></circle><path
-						d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.1A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3V9.6h.1A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.4.26.72.61.9 1 .11.25.18.52.2.8V11h.5v4h-.1a1.7 1.7 0 0 0-1.5 0Z"
-					></path></svg
-				>
-				<span>SETTINGS</span>
+	<div class="app-body">
+		{#if showThreads}<button class="mobile-scrim" on:click={() => (showThreads = false)} aria-label="閉じる"></button>{/if}
+		<aside class:open={showThreads} class="thread-sidebar">
+			<div class="project-switcher">
+				<label for="project">PROJECT</label>
+				<div class="select-wrap">
+					<select id="project" bind:value={selectedProjectId} on:change={() => selectProject(selectedProjectId)}>
+						{#each projects as project}
+							<option value={project.id}>{project.name}</option>
+						{/each}
+					</select>
+					<svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4" /></svg>
+				</div>
+				<button class="connect-button" on:click={() => (showProjectModal = true)} aria-label="リポジトリを接続">+</button>
+			</div>
+
+			<button class="sidebar-new" disabled={!selectedProject} on:click={startNewTask}>
+				<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+				新しいタスク
 			</button>
-		</aside>
 
-		<aside class="project-panel">
-			<div class="panel-heading">
-				<div>
-					<span class="eyebrow">ENVIRONMENTS</span>
-					<h2>Projects</h2>
-				</div>
-				<button
-					class="add-button"
-					on:click={() => (showProjectModal = true)}
-					aria-label="Add project">+</button
-				>
-			</div>
-
-			<div class="project-list">
-				{#each projects as project}
-					<button
-						class:active={project.id === selectedProjectId}
-						class="project-row"
-						on:click={() => selectProject(project.id)}
-					>
-						<span class="repo-icon">
-							<svg viewBox="0 0 24 24"
-								><path
-									d="M3 5.5A2.5 2.5 0 0 1 5.5 3H10l2 2h6.5A2.5 2.5 0 0 1 21 7.5v9A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-11Z"
-								></path></svg
-							>
-						</span>
-						<span class="project-copy">
-							<strong>{project.name}</strong>
-							<small>{project.default_branch}</small>
-						</span>
-						<span class="task-count"
-							>{tasks.filter((task) => task.project_id === project.id).length}</span
-						>
-					</button>
+			<div class="thread-label"><span>RECENT</span><b>{projectTasks.length}</b></div>
+			<div class="thread-list">
+				{#if loading}
+					<div class="skeleton"></div><div class="skeleton short"></div>
 				{:else}
-					<button class="empty-project" on:click={() => (showProjectModal = true)}>
-						<span>+</span>
-						<strong>Connect repository</strong>
-						<small>GitHub URLから開始</small>
-					</button>
-				{/each}
+					{#each projectTasks as task}
+						<button class:active={task.id === selectedTaskId} class="thread" on:click={() => selectTask(task.id)}>
+							<span class="thread-status status-{task.status}"></span>
+							<span class="thread-copy">
+								<strong>{task.title}</strong>
+								<small>{statusLabel(task.status)} · {relativeTime(task.updated_at)}</small>
+							</span>
+						</button>
+					{:else}
+						<div class="no-threads">最初の依頼を入力すると、ここに会話が保存されます。</div>
+					{/each}
+				{/if}
 			</div>
-
-			<div class="sandbox-card">
-				<div class="sandbox-card-head">
-					<span class="pulse-dot"></span>
-					<strong>Personal sandbox</strong>
-					<small>READY</small>
-				</div>
-				<div class="sandbox-meter">
-					<span style="width: {Math.min(80, 18 + (dashboard?.running ?? 0) * 24)}%"></span>
-				</div>
-				<div class="sandbox-meta">
-					<span>{dashboard?.sandbox.active_tasks ?? 0} ACTIVE</span>
-					<span>ISOLATED</span>
-				</div>
+			<div class="sandbox-note">
+				<span class="presence"></span>
+				<div><strong>Personal sandbox</strong><small>ユーザーごとに分離</small></div>
 			</div>
 		</aside>
 
-		<main class="main-stage">
-			<section class="stage-header">
-				<div class="project-title">
-					<div class="breadcrumb">
-						<span>WORKSPACE</span><b>/</b><span>{selectedProject?.name ?? 'NO PROJECT'}</span>
-					</div>
-					<h1>{selectedProject?.name ?? 'Connect your first repository'}</h1>
-					{#if selectedProject}
+		<main class:inspector-open={showInspector && selectedTask} class="conversation">
+			<div class="messages" bind:this={messages}>
+				{#if !selectedTask}
+					<section class="empty-chat">
+						<div class="empty-mark"><span></span><span></span><span></span></div>
+						<h1>何を作りますか？</h1>
 						<p>
-							<span>↗</span>{selectedProject.repository_url.replace(/^https?:\/\//, '')}
-							<b>•</b>
-							<span>⑂</span>{selectedProject.default_branch}
+							リポジトリを読み、実装し、テストまで進めます。<br />
+							作業中の判断や変更ファイルは、この会話にそのまま表示されます。
 						</p>
-					{:else}
-						<p>リポジトリを接続すると、専用Sandboxでエージェントを実行できます。</p>
-					{/if}
-				</div>
-				<button
-					class="new-task-button"
-					disabled={!selectedProject}
-					on:click={() => (showTaskModal = true)}
-				>
-					<span>+</span> NEW TASK <kbd>⌘↵</kbd>
-				</button>
-			</section>
-
-			<section class="metric-strip">
-				<div class="metric">
-					<span>RUNNING</span>
-					<strong>{dashboard?.running ?? 0}</strong>
-					<small class="live"><i></i> LIVE</small>
-				</div>
-				<div class="metric">
-					<span>QUEUED</span>
-					<strong>{tasks.filter((task) => task.status === 'queued').length}</strong>
-					<small>NEXT UP</small>
-				</div>
-				<div class="metric">
-					<span>NEEDS YOU</span>
-					<strong>{dashboard?.waiting_permission ?? 0}</strong>
-					<small class:warning={(dashboard?.waiting_permission ?? 0) > 0}>PERMISSION</small>
-				</div>
-				<div class="metric">
-					<span>COMPLETED</span>
-					<strong>{dashboard?.completed ?? 0}</strong>
-					<small>ALL TIME</small>
-				</div>
-			</section>
-
-			<section class="command-grid">
-				<div class="task-column">
-					<div class="column-heading">
-						<div>
-							<span class="eyebrow">AGENT QUEUE</span>
-							<h3>Tasks <b>{projectTasks.length}</b></h3>
+						<div class="suggestions">
+							<button on:click={() => (prompt = 'このリポジトリを調査して、改善すべき点を3つ提案して')}>
+								<span>01</span>リポジトリを調査
+							</button>
+							<button on:click={() => (prompt = 'READMEを改善して、初めての人でも起動できるようにして')}>
+								<span>02</span>READMEを改善
+							</button>
+							<button on:click={() => (prompt = 'テストを実行して、失敗している箇所を修正して')}>
+								<span>03</span>テストを修正
+							</button>
 						</div>
-						<button aria-label="Filter tasks">
-							<svg viewBox="0 0 24 24"
-								><path d="M4 5h16"></path><path d="M7 12h10"></path><path d="M10 19h4"></path></svg
-							>
+					</section>
+				{:else}
+					<div class="conversation-inner">
+						<div class="task-meta">
+							<span>{selectedProject?.name}</span>
+							<i>/</i>
+							<span>{selectedTask.branch_name.replace('openm/', '')}</span>
+						</div>
+
+						<article class="user-message">
+							<div class="user-avatar">YOU</div>
+							<div>
+								<div class="message-author"><strong>あなた</strong><time>{relativeTime(selectedTask.created_at)}</time></div>
+								<p>{selectedTask.prompt}</p>
+							</div>
+						</article>
+
+						<article class="agent-message">
+							<div class="openm-avatar"><span></span><span></span><span></span></div>
+							<div class="agent-content">
+								<div class="message-author">
+									<strong>OpenM</strong>
+									<span class="model-name">{selectedTask.model}</span>
+								</div>
+
+								<section class:attention={pendingPermissions.length > 0} class="run-card">
+									<div class="run-card-head">
+										<div class="run-copy">
+											<span class="run-status status-{selectedTask.status}">
+												<i></i>{statusLabel(selectedTask.status)}
+											</span>
+											<h2>{currentAction}</h2>
+											<p>{elapsedTime(selectedTask)} · {events.length}件のアクティビティ</p>
+										</div>
+										<strong class="progress-number">{progress}<small>%</small></strong>
+									</div>
+									<div class="progress-track"><span style={`width:${progress}%`}></span></div>
+									<div class="phase-list">
+										{#each phases as phase}
+											<div class="phase phase-{phase.state}">
+												<span>{phase.state === 'complete' ? '✓' : ''}</span>
+												<small>{phase.label}</small>
+											</div>
+										{/each}
+									</div>
+									{#if ['queued', 'preparing', 'running', 'waiting_permission', 'waiting_user'].includes(selectedTask.status)}
+										<button class="text-action danger" on:click={cancelTask}>実行を停止</button>
+									{:else if ['cancelled', 'failed', 'timed_out'].includes(selectedTask.status)}
+										<button class="text-action" on:click={resumeTask}>もう一度実行</button>
+									{/if}
+								</section>
+
+								{#each pendingPermissions as permission}
+									<section class="approval-card">
+										<div class="approval-icon">!</div>
+										<div>
+											<span>あなたの確認が必要です</span>
+											<h3>{permission.tool_name} を実行してよいですか？</h3>
+											<pre>{JSON.stringify(permission.tool_input_json, null, 2)}</pre>
+											<div class="approval-actions">
+												<button on:click={() => decidePermission(permission, 'deny')}>拒否</button>
+												<button on:click={() => decidePermission(permission, 'allow_once')}>今回のみ許可</button>
+												<button class="primary" on:click={() => decidePermission(permission, 'allow_for_task')}>このタスクで許可</button>
+											</div>
+										</div>
+									</section>
+								{/each}
+
+								{#if activityEvents.length}
+									<details class="activity-card" open={selectedTask.status !== 'succeeded'}>
+										<summary>
+											<span class="activity-symbol">
+												{selectedTask.status === 'succeeded' ? '✓' : '⋯'}
+											</span>
+											<div>
+												<strong>作業の詳細</strong>
+												<small>{activityEvents.length}件のステップ</small>
+											</div>
+											<svg viewBox="0 0 24 24"><path d="m8 10 4 4 4-4" /></svg>
+										</summary>
+										<div class="activity-list">
+											{#each activityEvents as event, index}
+												<div class="activity-row">
+													<div class="activity-line"><span class:live={index === activityEvents.length - 1}></span></div>
+													<div>
+														<strong>{eventLabel(event)}</strong>
+														{#if eventDetail(event)}<pre>{eventDetail(event)}</pre>{/if}
+														<time>{new Date(event.timestamp * 1000).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</time>
+													</div>
+												</div>
+											{/each}
+										</div>
+									</details>
+								{/if}
+
+								{#if selectedTask.status === 'succeeded'}
+									<section class="result-card">
+										<div class="result-head">
+											<div class="success-mark">✓</div>
+											<div><span>完了しました</span><strong>{selectedTask.title}</strong></div>
+										</div>
+										{#if eventDetail(resultEvent)}<p>{eventDetail(resultEvent)}</p>{/if}
+										<div class="result-facts">
+											<div><span>変更ファイル</span><strong>{changedFiles.length}</strong></div>
+											<div><span>所要時間</span><strong>{elapsedTime(selectedTask)}</strong></div>
+											<div><span>コスト</span><strong>${selectedTask.actual_cost.toFixed(4)}</strong></div>
+										</div>
+										{#if changedFiles.length}
+											<button class="view-work" on:click={() => { inspectorTab = 'changes'; showInspector = true; }}>
+												変更内容を確認
+												<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>
+											</button>
+										{/if}
+									</section>
+								{/if}
+							</div>
+						</article>
+					</div>
+				{/if}
+			</div>
+
+			<div class="composer-area">
+				<form class="composer" on:submit|preventDefault={submitTask}>
+					<textarea
+						bind:this={composer}
+						bind:value={prompt}
+						on:input={autoGrow}
+						on:keydown={(event) => {
+							if (event.key === 'Enter' && !event.shiftKey) {
+								event.preventDefault();
+								submitTask();
+							}
+						}}
+						placeholder={selectedProject ? 'OpenMに実装を依頼する' : '先にリポジトリを接続してください'}
+						disabled={!selectedProject || submitting}
+						rows="1"
+					></textarea>
+					<div class="composer-tools">
+						<div>
+							<button type="button" class="tool-button" on:click={() => (showProjectModal = true)} aria-label="リポジトリ">
+								<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+							</button>
+							<select bind:value={taskModel} aria-label="モデル">
+								<option value="claude-glm-code">GLM Code</option>
+								<option value="claude-glm-main">GLM Main</option>
+							</select>
+						</div>
+						<button class="send-button" disabled={!prompt.trim() || !selectedProject || submitting} aria-label="送信">
+							{#if submitting}<span class="spinner"></span>{:else}<svg viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 5v14" /></svg>{/if}
 						</button>
 					</div>
-
-					<div class="task-list">
-						{#if loading}
-							<div class="loading-grid"><span></span><span></span><span></span></div>
-						{:else}
-							{#each projectTasks as task}
-								<button
-									class="task-card"
-									class:active={task.id === selectedTaskId}
-									on:click={() => selectTask(task.id)}
-								>
-									<div class="task-card-top">
-										<span class="status status-{task.status}"
-											><i></i>{statusLabel(task.status)}</span
-										>
-										<small>{relativeTime(task.updated_at)}</small>
-									</div>
-									<strong>{task.title}</strong>
-									<p>{task.prompt}</p>
-									<div class="task-progress" aria-label={`${taskProgress(task)}% complete`}>
-										<span style={`width: ${taskProgress(task)}%`}></span>
-									</div>
-									<div class="task-card-foot">
-										<span>⑂ {task.branch_name.replace('openm/', '')}</span>
-										<span>{taskProgress(task)}%</span>
-									</div>
-								</button>
-							{:else}
-								<div class="empty-state">
-									<div class="empty-glyph">_</div>
-									<strong>No agent tasks</strong>
-									<p>実装、調査、テストをエージェントへ依頼します。</p>
-									<button disabled={!selectedProject} on:click={() => (showTaskModal = true)}>
-										Create first task
-									</button>
-								</div>
-							{/each}
-						{/if}
-					</div>
-				</div>
-
-				<div class="activity-column">
-					<div class="column-heading activity-heading">
-						<div>
-							<span class="eyebrow">LIVE SESSION</span>
-							<h3>{selectedTask?.title ?? 'Activity'}</h3>
-						</div>
-						{#if selectedTask}
-							<div class="task-controls">
-								<span class="status status-{selectedTask.status}"
-									><i></i>{statusLabel(selectedTask.status)}</span
-								>
-								{#if ['queued', 'preparing', 'running', 'waiting_permission', 'waiting_user'].includes(selectedTask.status)}
-									<button class="stop-button" on:click={cancelTask}>■ STOP</button>
-								{:else if ['cancelled', 'failed', 'timed_out'].includes(selectedTask.status)}
-									<button class="resume-button" on:click={resumeTask}>▶ RESUME</button>
-								{/if}
-							</div>
-						{/if}
-					</div>
-
-					{#if selectedTask}
-						<section
-							class:attention={pendingPermissions.length > 0}
-							class:failed={selectedTask.status === 'failed'}
-							class="run-overview"
-							aria-label="Task progress"
-						>
-							<div class="run-now">
-								<div class="run-state-mark">
-									<span>{String(progressPhases.findIndex((phase) => phase === activePhase) + 1).padStart(2, '0')}</span>
-								</div>
-								<div class="run-now-copy">
-									<span class="eyebrow"
-										>{pendingPermissions.length ? 'NEEDS YOUR DECISION' : 'NOW WORKING ON'}</span
-									>
-									<strong>{activePhase?.label ?? statusLabel(selectedTask.status)}</strong>
-									<p>{currentAction}</p>
-								</div>
-								<div class="run-percent">
-									<strong>{progressPercent}</strong><span>%</span>
-									<small>{elapsedTime(selectedTask)}</small>
-								</div>
-							</div>
-
-							<div class="phase-rail">
-								{#each progressPhases as phase, index}
-									<div class="phase phase-{phase.state}">
-										<div class="phase-node">
-											<span>{phase.state === 'complete' ? '✓' : index + 1}</span>
-										</div>
-										<div class="phase-copy">
-											<strong>{phase.shortLabel}</strong>
-											<small>{phase.label}</small>
-										</div>
-										{#if index < progressPhases.length - 1}<i></i>{/if}
-									</div>
-								{/each}
-							</div>
-
-							<div class="run-facts">
-								<div><span>EVENTS</span><strong>{events.length}</strong></div>
-								<div><span>FILES TOUCHED</span><strong>{changedFiles.length}</strong></div>
-								<div>
-									<span>LAST SIGNAL</span>
-									<strong>{latestMeaningfulEvent ? relativeTime(latestMeaningfulEvent.timestamp) : '—'}</strong>
-								</div>
-								<div>
-									<span>RUN HEALTH</span>
-									<strong
-										class:warn={pendingPermissions.length > 0}
-										class:error={selectedTask.status === 'failed'}
-									>
-										{selectedTask.status === 'failed'
-											? 'BLOCKED'
-											: pendingPermissions.length
-												? 'NEEDS YOU'
-												: selectedTask.status === 'succeeded'
-													? 'VERIFIED'
-													: 'ON TRACK'}
-									</strong>
-								</div>
-							</div>
-						</section>
-					{/if}
-
-					<div class="activity-feed">
-						{#each pendingPermissions as permission}
-							<div class="permission-card">
-								<div class="permission-signal">!</div>
-								<div class="permission-content">
-									<span>PERMISSION REQUIRED · {permission.risk_level.toUpperCase()}</span>
-									<strong>{permission.tool_name}</strong>
-									<pre>{JSON.stringify(permission.tool_input_json, null, 2)}</pre>
-									<div class="permission-actions">
-										<button on:click={() => decidePermission(permission, 'deny')}>DENY</button>
-										<button on:click={() => decidePermission(permission, 'allow_once')}
-											>ALLOW ONCE</button
-										>
-										<button
-											class="primary"
-											on:click={() => decidePermission(permission, 'allow_for_task')}
-											>ALLOW FOR TASK</button
-										>
-									</div>
-								</div>
-							</div>
-						{/each}
-
-						{#if events.length}
-							<div class="worklog-toolbar">
-								<div>
-									<span class="eyebrow">WORKLOG</span>
-									<strong>{filteredEvents.length} signals</strong>
-								</div>
-								<div class="event-filters" aria-label="Filter worklog">
-									{#each eventFilters as filter}
-										<button
-											class:active={activeEventFilter === filter}
-											on:click={() => setEventFilter(filter)}
-										>
-											{filter}
-										</button>
-									{/each}
-								</div>
-							</div>
-						{/if}
-
-						{#each filteredEvents as event, index}
-							<div class="event-row">
-								<div class="timeline">
-									<span class:event-active={index === filteredEvents.length - 1}></span>
-								</div>
-								<div class="event-card event-{event.type.replaceAll('.', '-')}">
-									<div class="event-meta">
-										<div>
-											<span class="event-kind kind-{eventKind(event).toLowerCase()}"
-												>{eventKind(event)}</span
-											>
-											<strong>{eventTitle(event)}</strong>
-										</div>
-										<time
-											>{new Date(event.timestamp * 1000).toLocaleTimeString('ja-JP', {
-												hour: '2-digit',
-												minute: '2-digit',
-												second: '2-digit'
-											})}</time
-										>
-									</div>
-									{#if eventBody(event)}
-										<pre>{eventBody(event)}</pre>
-									{/if}
-								</div>
-							</div>
-						{:else}
-							<div class="activity-empty">
-								<div class="radar"><span></span></div>
-								<strong>{selectedTask ? 'Waiting for agent events' : 'Select a task'}</strong>
-								<p>
-									{selectedTask
-										? 'イベントが発生すると、ここへリアルタイムに表示されます。'
-										: '左のキューから作業内容を選択してください。'}
-								</p>
-							</div>
-						{/each}
-					</div>
-
-					{#if selectedTask}
-						<div class="prompt-bar">
-							<span>›</span>
-							<input aria-label="Follow-up instruction" placeholder="エージェントへ追加の指示…" />
-							<button aria-label="Send instruction">↵</button>
-						</div>
-					{/if}
-				</div>
-
-				<aside class="inspector">
-					<div class="inspector-tabs">
-						<button
-							class:active={activeInspector === 'changes'}
-							on:click={() => (activeInspector = 'changes')}>CHANGES</button
-						>
-						<button
-							class:active={activeInspector === 'terminal'}
-							on:click={() => (activeInspector = 'terminal')}>TERMINAL</button
-						>
-						<button
-							class:active={activeInspector === 'context'}
-							on:click={() => (activeInspector = 'context')}>CONTEXT</button
-						>
-					</div>
-
-					<div class="inspector-body">
-						{#if activeInspector === 'changes'}
-							<div class="change-summary">
-								<span class="eyebrow">WORKTREE</span>
-								<strong>{selectedTask?.branch_name ?? 'No task selected'}</strong>
-								<p>{selectedTask?.worktree_path ?? 'タスク開始後にworktreeを作成します'}</p>
-							</div>
-							<div class="file-summary">
-								<div><span>FILES</span><strong>{changedFiles.length}</strong></div>
-								<div><span>ADDITIONS</span><strong class="plus">+{additions}</strong></div>
-								<div><span>DELETIONS</span><strong class="minus">−{deletions}</strong></div>
-							</div>
-							{#if changedFiles.length}
-								<div class="changed-files">
-									{#each changedFiles as file}
-										<div><span>M</span>{file}</div>
-									{/each}
-								</div>
-								{#if currentDiff}
-									<pre class="diff-preview">{currentDiff}</pre>
-								{/if}
-							{:else}
-								<div class="inspector-empty">
-									<svg viewBox="0 0 24 24"
-										><path d="M4 4h16v16H4z"></path><path d="M8 9h8"></path><path d="M8 13h6"
-										></path><path d="M8 17h4"></path></svg
-									>
-									<strong>No changes yet</strong>
-									<p>Agentが編集した差分をここで確認できます。</p>
-								</div>
-							{/if}
-						{:else if activeInspector === 'terminal'}
-							<div class="terminal">
-								<div class="terminal-line muted">$ openm status</div>
-								<div class="terminal-line"><span>workspace</span> user-sandbox</div>
-								<div class="terminal-line"><span>project</span> {selectedProject?.name ?? '—'}</div>
-								<div class="terminal-line">
-									<span>task</span>
-									{selectedTask?.id.slice(0, 18) ?? '—'}
-								</div>
-								{#each terminalEvents as event}
-									<div class="terminal-line">
-										{String(event.data.output ?? event.data.text ?? '')}
-									</div>
-								{/each}
-								<div class="terminal-line cursor">█</div>
-							</div>
-						{:else}
-							<dl class="context-list">
-								<div>
-									<dt>MODEL</dt>
-									<dd>{selectedTask?.model ?? 'claude-glm-code'}</dd>
-								</div>
-								<div>
-									<dt>MAX TURNS</dt>
-									<dd>{selectedTask?.max_turns ?? 40}</dd>
-								</div>
-								<div>
-									<dt>BUDGET</dt>
-									<dd>${selectedTask?.max_budget.toFixed(2) ?? '5.00'}</dd>
-								</div>
-								<div>
-									<dt>ACTUAL</dt>
-									<dd>${selectedTask?.actual_cost.toFixed(4) ?? '0.0000'}</dd>
-								</div>
-								<div>
-									<dt>ISOLATION</dt>
-									<dd>USER + WORKTREE</dd>
-								</div>
-							</dl>
-						{/if}
-					</div>
-				</aside>
-			</section>
+				</form>
+				<p>OpenMは専用Sandboxでコードを変更します。重要な差分は確認してください。</p>
+			</div>
 		</main>
+
+		{#if selectedTask}
+			<aside class:open={showInspector} class="inspector">
+				<div class="inspector-head">
+					<div>
+						<span>ARTIFACTS</span>
+						<strong>Workspace</strong>
+					</div>
+					<button class="icon-button" on:click={() => (showInspector = false)} aria-label="閉じる">
+						<svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg>
+					</button>
+				</div>
+				<div class="inspector-tabs">
+					<button class:active={inspectorTab === 'changes'} on:click={() => (inspectorTab = 'changes')}>変更</button>
+					<button class:active={inspectorTab === 'terminal'} on:click={() => (inspectorTab = 'terminal')}>実行</button>
+					<button class:active={inspectorTab === 'context'} on:click={() => (inspectorTab = 'context')}>環境</button>
+				</div>
+				<div class="inspector-body">
+					{#if inspectorTab === 'changes'}
+						<div class="inspector-summary">
+							<span>WORKTREE</span>
+							<strong>{selectedTask.branch_name}</strong>
+							<small>{selectedTask.worktree_path ?? '準備中'}</small>
+						</div>
+						{#if changedFiles.length}
+							<div class="file-list">
+								{#each changedFiles as file}<div><span>M</span><strong>{file}</strong></div>{/each}
+							</div>
+							{#if currentDiff}<pre class="diff">{currentDiff}</pre>{/if}
+						{:else}
+							<div class="inspector-empty"><span>◇</span><strong>変更はまだありません</strong><p>ファイルを編集すると、ここに差分が表示されます。</p></div>
+						{/if}
+					{:else if inspectorTab === 'terminal'}
+						<div class="terminal">
+							<div class="terminal-command">$ openm run {selectedTask.id.slice(0, 12)}</div>
+							{#each terminalEvents as event}<pre>{eventDetail(event)}</pre>{/each}
+							<span class="cursor"></span>
+						</div>
+					{:else}
+						<dl class="context">
+							<div><dt>Project</dt><dd>{selectedProject?.name}</dd></div>
+							<div><dt>Model</dt><dd>{selectedTask.model}</dd></div>
+							<div><dt>Branch</dt><dd>{selectedTask.branch_name}</dd></div>
+							<div><dt>Isolation</dt><dd>User sandbox</dd></div>
+							<div><dt>Max turns</dt><dd>{selectedTask.max_turns}</dd></div>
+							<div><dt>Budget</dt><dd>${selectedTask.max_budget.toFixed(2)}</dd></div>
+						</dl>
+					{/if}
+				</div>
+			</aside>
+		{/if}
 	</div>
 </div>
 
 {#if showProjectModal}
-	<div class="modal-backdrop">
-		<form class="modal" on:submit|preventDefault={submitProject}>
-			<div class="modal-index">01 / PROJECT</div>
-			<h2>Connect repository</h2>
-			<p>ユーザー専用SandboxへcloneするGitリポジトリを登録します。</p>
-			<label>
-				<span>PROJECT NAME</span>
-				<input bind:value={projectName} placeholder="openm-web" required />
-			</label>
-			<label>
-				<span>REPOSITORY URL</span>
-				<input bind:value={repositoryUrl} placeholder="https://github.com/org/repo.git" required />
-			</label>
-			<label>
-				<span>DEFAULT BRANCH</span>
-				<input bind:value={defaultBranch} placeholder="main" required />
-			</label>
-			<div class="modal-actions">
-				<button type="button" on:click={() => (showProjectModal = false)}>CANCEL</button>
-				<button class="primary" type="submit" disabled={submitting}>
-					{submitting ? 'CONNECTING…' : 'CONNECT PROJECT'}
-				</button>
-			</div>
-		</form>
-	</div>
-{/if}
-
-{#if showTaskModal}
-	<div class="modal-backdrop">
-		<form class="modal task-modal" on:submit|preventDefault={submitTask}>
-			<div class="modal-index">02 / AGENT TASK</div>
-			<h2>Delegate a task</h2>
-			<p>
-				<strong>{selectedProject?.name}</strong> の専用worktreeでClaude Codeエージェントを起動します。
-			</p>
-			<label>
-				<span>TASK TITLE</span>
-				<input bind:value={taskTitle} placeholder="認証画面のバグを修正" required />
-			</label>
-			<label>
-				<span>INSTRUCTION</span>
-				<textarea
-					bind:value={taskPrompt}
-					rows="7"
-					placeholder="症状、期待する挙動、実行してほしいテストを記述してください。"
-					required
-				></textarea>
-			</label>
-			<label>
-				<span>MODEL ROUTE</span>
-				<select bind:value={taskModel}>
-					<option value="claude-glm-code">GLM Code via LiteLLM</option>
-					<option value="claude-glm-main">GLM Main via LiteLLM</option>
-				</select>
-			</label>
-			<div class="modal-actions">
-				<button type="button" on:click={() => (showTaskModal = false)}>CANCEL</button>
-				<button class="primary" type="submit" disabled={submitting}>
-					{submitting ? 'QUEUING…' : 'START AGENT'}
-				</button>
-			</div>
-		</form>
-	</div>
+	<button class="modal-backdrop" on:click={() => (showProjectModal = false)} aria-label="閉じる"></button>
+	<form class="modal" on:submit|preventDefault={submitProject}>
+		<div class="modal-kicker">NEW PROJECT</div>
+		<h2>リポジトリを接続</h2>
+		<p>ユーザー専用Sandboxへcloneし、OpenMが作業できるようにします。</p>
+		<label><span>プロジェクト名</span><input bind:value={projectName} placeholder="openm-web" required /></label>
+		<label><span>Repository URL</span><input bind:value={repositoryUrl} placeholder="https://github.com/org/repo.git" required /></label>
+		<label><span>Default branch</span><input bind:value={defaultBranch} placeholder="main" required /></label>
+		<div class="modal-actions">
+			<button type="button" on:click={() => (showProjectModal = false)}>キャンセル</button>
+			<button class="primary" disabled={submitting}>{submitting ? '接続中…' : '接続する'}</button>
+		</div>
+	</form>
 {/if}
 
 <style>
-	:global(body) {
-		overflow: hidden;
-		background: #0b0d0e;
-	}
-
-	:global(.dark body) {
-		background: #0b0d0e;
-	}
-
-	.openm-shell {
-		--ink: #e9ece8;
-		--muted: #858c89;
-		--line: #262b2a;
-		--panel: #111413;
-		--panel-raised: #171a19;
-		--lime: #c7f36b;
-		--amber: #ffb454;
-		--red: #ff6b5f;
-		--cyan: #69d8da;
-		width: 100%;
-		height: 100dvh;
-		color: var(--ink);
-		background: linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-			linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px), #0b0d0e;
-		background-size: 32px 32px;
-		font-family: 'Archivo', sans-serif;
-		overflow: hidden;
-	}
-
-	button,
-	input,
-	textarea,
-	select {
-		font: inherit;
-	}
-
-	button {
-		color: inherit;
-	}
-
-	svg {
-		width: 1.15rem;
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 1.7;
-		stroke-linecap: round;
-		stroke-linejoin: round;
-	}
-
-	.topbar {
-		height: 68px;
-		display: grid;
-		grid-template-columns: 280px 1fr 280px;
-		align-items: center;
-		border-bottom: 1px solid var(--line);
-		background: rgba(11, 13, 14, 0.94);
-		backdrop-filter: blur(18px);
-		position: relative;
-		z-index: 10;
-	}
-
-	.brand {
-		height: 100%;
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 0 19px;
-		border-right: 1px solid var(--line);
-	}
-
-	.brand-mark {
-		width: 31px;
-		height: 31px;
-		border: 1px solid #424a46;
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		align-items: end;
-		gap: 3px;
-		padding: 6px;
-		transform: rotate(-2deg);
-	}
-
-	.brand-mark span {
-		background: var(--lime);
-		height: 50%;
-	}
-
-	.brand-mark span:nth-child(2) {
-		height: 100%;
-	}
-
-	.brand-mark span:nth-child(3) {
-		height: 72%;
-	}
-
-	.wordmark {
-		font-family: 'InstrumentSerif', serif;
-		font-size: 25px;
-		line-height: 20px;
-		letter-spacing: -0.6px;
-	}
-
-	.brand-subtitle,
-	.eyebrow {
-		color: var(--muted);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		font-weight: 700;
-		letter-spacing: 1.45px;
-	}
-
-	.brand-subtitle {
-		margin-top: 5px;
-	}
-
-	.topbar-center,
-	.topbar-actions {
-		display: flex;
-		align-items: center;
-	}
-
-	.topbar-center {
-		justify-content: center;
-		gap: 18px;
-	}
-
-	.environment-pill,
-	.model-pill {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 9px;
-		letter-spacing: 0.8px;
-	}
-
-	.environment-pill > span:not(.pulse-dot),
-	.model-pill span {
-		color: var(--muted);
-	}
-
-	.environment-pill strong {
-		color: var(--lime);
-	}
-
-	.pulse-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--lime);
-		box-shadow:
-			0 0 0 4px rgba(199, 243, 107, 0.1),
-			0 0 12px rgba(199, 243, 107, 0.4);
-		animation: pulse 2s ease-in-out infinite;
-	}
-
-	.divider {
-		width: 1px;
-		height: 18px;
-		background: var(--line);
-	}
-
-	.topbar-actions {
-		height: 100%;
-		justify-content: flex-end;
-		gap: 4px;
-		padding: 0 17px;
-		border-left: 1px solid var(--line);
-	}
-
-	.icon-button,
-	.add-button,
-	.column-heading button {
-		border: 0;
-		background: transparent;
-		cursor: pointer;
-	}
-
-	.icon-button {
-		width: 36px;
-		height: 36px;
-		display: grid;
-		place-items: center;
-		color: #8c9390;
-		position: relative;
-	}
-
-	.icon-button:hover {
-		color: var(--ink);
-		background: #171a19;
-	}
-
-	.notification-count {
-		position: absolute;
-		top: 4px;
-		right: 2px;
-		width: 15px;
-		height: 15px;
-		display: grid;
-		place-items: center;
-		border-radius: 50%;
-		background: var(--amber);
-		color: #15120d;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		font-weight: 900;
-	}
-
-	.avatar {
-		width: 31px;
-		height: 31px;
-		display: grid;
-		place-items: center;
-		margin-left: 8px;
-		border-radius: 2px;
-		background: #d8dcd7;
-		color: #111;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 10px;
-		font-weight: 800;
-	}
-
-	.workspace {
-		height: calc(100dvh - 68px);
-		display: grid;
-		grid-template-columns: 70px 210px minmax(0, 1fr);
-	}
-
-	.rail {
-		padding: 17px 0;
-		border-right: 1px solid var(--line);
-		background: rgba(13, 15, 15, 0.88);
-		display: flex;
-		flex-direction: column;
-		justify-content: space-between;
-	}
-
-	.rail-nav {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.rail-item {
-		width: 100%;
-		height: 58px;
-		padding: 7px 0;
-		border: 0;
-		background: transparent;
-		color: #69706d;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 5px;
-		cursor: pointer;
-		position: relative;
-	}
-
-	.rail-item span {
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 6px;
-		letter-spacing: 0.65px;
-	}
-
-	.rail-item.active {
-		color: var(--lime);
-	}
-
-	.rail-item.active::before {
-		content: '';
-		position: absolute;
-		left: 0;
-		top: 10px;
-		bottom: 10px;
-		width: 2px;
-		background: var(--lime);
-		box-shadow: 0 0 10px rgba(199, 243, 107, 0.45);
-	}
-
-	.project-panel {
-		min-width: 0;
-		background: rgba(17, 20, 19, 0.95);
-		border-right: 1px solid var(--line);
-		display: flex;
-		flex-direction: column;
-	}
-
-	.panel-heading,
-	.column-heading {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.panel-heading {
-		height: 85px;
-		padding: 0 16px 0 18px;
-		border-bottom: 1px solid var(--line);
-	}
-
-	.panel-heading h2 {
-		margin: 4px 0 0;
-		font-size: 17px;
-		font-weight: 600;
-		letter-spacing: -0.35px;
-	}
-
-	.add-button {
-		width: 27px;
-		height: 27px;
-		display: grid;
-		place-items: center;
-		border: 1px solid #343a37;
-		color: #aab0ad;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 17px;
-	}
-
-	.add-button:hover {
-		border-color: var(--lime);
-		color: var(--lime);
-	}
-
-	.project-list {
-		flex: 1;
-		padding: 10px;
-		overflow-y: auto;
-	}
-
-	.project-row {
-		width: 100%;
-		min-height: 56px;
-		padding: 9px;
-		border: 1px solid transparent;
-		background: transparent;
-		display: grid;
-		grid-template-columns: 31px 1fr auto;
-		gap: 9px;
-		align-items: center;
-		text-align: left;
-		cursor: pointer;
-	}
-
-	.project-row:hover {
-		background: #171a19;
-	}
-
-	.project-row.active {
-		border-color: #303632;
-		background: #1a1e1c;
-		box-shadow: inset 2px 0 var(--lime);
-	}
-
-	.repo-icon {
-		width: 30px;
-		height: 30px;
-		display: grid;
-		place-items: center;
-		border: 1px solid #343a37;
-		color: #929995;
-	}
-
-	.repo-icon svg {
-		width: 15px;
-	}
-
-	.project-copy {
-		min-width: 0;
-	}
-
-	.project-copy strong,
-	.project-copy small {
-		display: block;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.project-copy strong {
-		font-size: 11px;
-		font-weight: 600;
-	}
-
-	.project-copy small,
-	.task-count {
-		margin-top: 3px;
-		color: #747b77;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-	}
-
-	.task-count {
-		margin: 0;
-	}
-
-	.empty-project {
-		width: 100%;
-		padding: 22px 10px;
-		border: 1px dashed #343a37;
-		background: transparent;
-		color: var(--muted);
-		cursor: pointer;
-	}
-
-	.empty-project span,
-	.empty-project strong,
-	.empty-project small {
-		display: block;
-	}
-
-	.empty-project span {
-		color: var(--lime);
-		font-size: 25px;
-	}
-
-	.empty-project strong {
-		margin: 7px 0 3px;
-		color: var(--ink);
-		font-size: 11px;
-	}
-
-	.empty-project small {
-		font-size: 9px;
-	}
-
-	.sandbox-card {
-		padding: 13px 15px 16px;
-		border-top: 1px solid var(--line);
-		background: #0e1110;
-	}
-
-	.sandbox-card-head {
-		display: grid;
-		grid-template-columns: auto 1fr auto;
-		align-items: center;
-		gap: 8px;
-		font-size: 9px;
-	}
-
-	.sandbox-card-head .pulse-dot {
-		width: 5px;
-		height: 5px;
-	}
-
-	.sandbox-card-head small,
-	.sandbox-meta {
-		color: var(--lime);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.7px;
-	}
-
-	.sandbox-meter {
-		height: 2px;
-		margin: 12px 0 7px;
-		background: #292e2b;
-	}
-
-	.sandbox-meter span {
-		display: block;
-		height: 100%;
-		background: var(--lime);
-		transition: width 0.4s ease;
-	}
-
-	.sandbox-meta {
-		display: flex;
-		justify-content: space-between;
-		color: #606763;
-	}
-
-	.main-stage {
-		min-width: 0;
-		display: grid;
-		grid-template-rows: 85px 64px minmax(0, 1fr);
-	}
-
-	.stage-header {
-		padding: 0 21px;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		border-bottom: 1px solid var(--line);
-		background: rgba(13, 15, 15, 0.84);
-	}
-
-	.breadcrumb {
-		display: flex;
-		gap: 7px;
-		color: #6c736f;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 1px;
-	}
-
-	.breadcrumb b {
-		color: #343936;
-	}
-
-	.project-title h1 {
-		margin: 4px 0 2px;
-		font-family: 'InstrumentSerif', serif;
-		font-size: clamp(22px, 2vw, 29px);
-		font-weight: 400;
-		letter-spacing: -0.35px;
-		line-height: 1;
-	}
-
-	.project-title p {
-		max-width: 600px;
-		margin: 5px 0 0;
-		color: #777e7a;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.project-title p span {
-		margin-right: 4px;
-		color: #a2aaa5;
-	}
-
-	.project-title p b {
-		margin: 0 7px;
-		color: #3c423f;
-	}
-
-	.new-task-button {
-		min-width: 145px;
-		height: 38px;
-		border: 0;
-		background: var(--lime);
-		color: #12150f;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 9px;
-		font-weight: 900;
-		letter-spacing: 0.8px;
-		cursor: pointer;
-		box-shadow: 0 7px 24px rgba(199, 243, 107, 0.08);
-	}
-
-	.new-task-button:hover:not(:disabled) {
-		background: #dcff91;
-		transform: translateY(-1px);
-	}
-
-	.new-task-button:disabled {
-		opacity: 0.35;
-		cursor: not-allowed;
-	}
-
-	.new-task-button > span {
-		margin-right: 6px;
-	}
-
-	.new-task-button kbd {
-		margin-left: 9px;
-		padding: 2px 4px;
-		border: 1px solid rgba(0, 0, 0, 0.22);
-		font-size: 7px;
-	}
-
-	.metric-strip {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		border-bottom: 1px solid var(--line);
-		background: rgba(15, 17, 17, 0.72);
-	}
-
-	.metric {
-		padding: 0 17px;
-		display: grid;
-		grid-template-columns: 1fr auto;
-		grid-template-rows: 1fr 1fr;
-		align-items: end;
-		border-right: 1px solid var(--line);
-	}
-
-	.metric:last-child {
-		border-right: 0;
-	}
-
-	.metric > span {
-		color: #6e7571;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 1.2px;
-	}
-
-	.metric strong {
-		grid-row: 1 / 3;
-		grid-column: 2;
-		align-self: center;
-		font-family: 'InstrumentSerif', serif;
-		font-size: 28px;
-		font-weight: 400;
-	}
-
-	.metric small {
-		align-self: start;
-		color: #555c58;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.8px;
-	}
-
-	.metric small.live {
-		color: var(--lime);
-	}
-
-	.metric small.warning {
-		color: var(--amber);
-	}
-
-	.metric small i {
-		display: inline-block;
-		width: 4px;
-		height: 4px;
-		margin-right: 4px;
-		border-radius: 50%;
-		background: var(--lime);
-	}
-
-	.command-grid {
-		min-height: 0;
-		display: grid;
-		grid-template-columns: minmax(220px, 26%) minmax(330px, 1fr) minmax(230px, 29%);
-	}
-
-	.task-column,
-	.activity-column,
-	.inspector {
-		min-width: 0;
-		min-height: 0;
-		background: rgba(12, 14, 14, 0.9);
-	}
-
-	.task-column,
-	.activity-column {
-		border-right: 1px solid var(--line);
-	}
-
-	.task-column {
-		display: grid;
-		grid-template-rows: 55px minmax(0, 1fr);
-	}
-
-	.activity-column {
-		display: grid;
-		grid-template-rows: 55px auto minmax(0, 1fr) auto;
-	}
-
-	.column-heading {
-		padding: 0 14px;
-		border-bottom: 1px solid var(--line);
-	}
-
-	.column-heading h3 {
-		margin: 3px 0 0;
-		font-size: 12px;
-		font-weight: 600;
-	}
-
-	.column-heading h3 b {
-		margin-left: 5px;
-		color: #69706c;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-	}
-
-	.column-heading button {
-		color: #777e7a;
-	}
-
-	.task-list,
-	.activity-feed {
-		overflow-y: auto;
-		scrollbar-width: thin;
-		scrollbar-color: #323735 transparent;
-	}
-
-	.task-list {
-		padding: 8px;
-	}
-
-	.task-card {
-		width: 100%;
-		padding: 12px 12px 10px;
-		border: 1px solid transparent;
-		border-bottom-color: #222624;
-		background: transparent;
-		text-align: left;
-		cursor: pointer;
-	}
-
-	.task-card:hover {
-		background: #141716;
-	}
-
-	.task-card.active {
-		border-color: #343a37;
-		background: #171b19;
-		box-shadow: inset 2px 0 var(--lime);
-	}
-
-	.task-card-top,
-	.task-card-foot,
-	.event-meta {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-	}
-
-	.task-card-top > small {
-		color: #5e6561;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-	}
-
-	.status {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		color: #909793;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		font-weight: 700;
-		letter-spacing: 0.55px;
-		text-transform: uppercase;
-	}
-
-	.status i {
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: currentColor;
-	}
-
-	.status-running,
-	.status-succeeded {
-		color: var(--lime);
-	}
-
-	.status-queued,
-	.status-preparing {
-		color: var(--cyan);
-	}
-
-	.status-waiting_permission,
-	.status-waiting_user {
-		color: var(--amber);
-	}
-
-	.status-failed,
-	.status-cancelled,
-	.status-timed_out {
-		color: var(--red);
-	}
-
-	.task-card > strong {
-		display: block;
-		margin: 10px 0 5px;
-		font-size: 11px;
-		font-weight: 600;
-		line-height: 1.3;
-	}
-
-	.task-card > p {
-		height: 30px;
-		margin: 0;
-		overflow: hidden;
-		color: #727975;
-		font-size: 9px;
-		line-height: 15px;
-	}
-
-	.task-progress {
-		height: 2px;
-		margin-top: 11px;
-		overflow: hidden;
-		background: #272c29;
-	}
-
-	.task-progress span {
-		display: block;
-		height: 100%;
-		background: linear-gradient(90deg, var(--cyan), var(--lime));
-		box-shadow: 0 0 9px rgba(199, 243, 107, 0.25);
-		transition: width 0.45s ease;
-	}
-
-	.task-card-foot {
-		margin-top: 10px;
-		color: #555c58;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-	}
-
-	.loading-grid {
-		display: grid;
-		gap: 8px;
-	}
-
-	.loading-grid span {
-		height: 98px;
-		background: linear-gradient(90deg, #121514, #1a1e1c, #121514);
-		background-size: 200% 100%;
-		animation: loading 1.4s infinite;
-	}
-
-	.empty-state,
-	.activity-empty,
-	.inspector-empty {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		text-align: center;
-		color: #6e7571;
-	}
-
-	.empty-state {
-		min-height: 260px;
-		padding: 30px 20px;
-	}
-
-	.empty-glyph {
-		width: 45px;
-		height: 45px;
-		display: grid;
-		place-items: center;
-		border: 1px solid #333936;
-		color: var(--lime);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 22px;
-	}
-
-	.empty-state strong,
-	.activity-empty strong,
-	.inspector-empty strong {
-		margin-top: 15px;
-		color: #c3c8c4;
-		font-size: 11px;
-	}
-
-	.empty-state p,
-	.activity-empty p,
-	.inspector-empty p {
-		max-width: 220px;
-		margin: 5px 0 14px;
-		font-size: 9px;
-		line-height: 1.6;
-	}
-
-	.empty-state button {
-		padding: 8px 11px;
-		border: 1px solid #3c433f;
-		background: transparent;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		cursor: pointer;
-	}
-
-	.activity-heading {
-		padding-right: 11px;
-	}
-
-	.run-overview {
-		border-bottom: 1px solid var(--line);
-		background:
-			linear-gradient(120deg, rgba(105, 216, 218, 0.055), transparent 46%),
-			#0f1211;
-	}
-
-	.run-overview.attention {
-		background:
-			linear-gradient(120deg, rgba(255, 180, 84, 0.1), transparent 50%),
-			#12110e;
-	}
-
-	.run-overview.failed {
-		background:
-			linear-gradient(120deg, rgba(255, 107, 95, 0.1), transparent 50%),
-			#130f0e;
-	}
-
-	.run-now {
-		min-height: 72px;
-		padding: 11px 13px 9px;
-		display: grid;
-		grid-template-columns: 39px minmax(0, 1fr) auto;
-		gap: 11px;
-		align-items: center;
-	}
-
-	.run-state-mark {
-		width: 37px;
-		height: 37px;
-		display: grid;
-		place-items: center;
-		border: 1px solid rgba(105, 216, 218, 0.45);
-		background: rgba(105, 216, 218, 0.08);
-		color: var(--cyan);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 9px;
-		position: relative;
-	}
-
-	.run-state-mark::after {
-		content: '';
-		position: absolute;
-		inset: 4px;
-		border: 1px solid rgba(105, 216, 218, 0.16);
-	}
-
-	.attention .run-state-mark {
-		border-color: var(--amber);
-		background: rgba(255, 180, 84, 0.08);
-		color: var(--amber);
-	}
-
-	.failed .run-state-mark {
-		border-color: var(--red);
-		background: rgba(255, 107, 95, 0.08);
-		color: var(--red);
-	}
-
-	.run-now-copy {
-		min-width: 0;
-	}
-
-	.run-now-copy > strong {
-		display: block;
-		margin-top: 3px;
-		font-size: 12px;
-		font-weight: 650;
-		letter-spacing: -0.15px;
-	}
-
-	.run-now-copy p {
-		margin: 3px 0 0;
-		overflow: hidden;
-		color: #8b938e;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		line-height: 1.45;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.run-percent {
-		min-width: 53px;
-		text-align: right;
-	}
-
-	.run-percent strong {
-		font-family: 'InstrumentSerif', serif;
-		font-size: 28px;
-		font-weight: 400;
-		line-height: 1;
-	}
-
-	.run-percent > span {
-		color: var(--cyan);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-	}
-
-	.run-percent small {
-		display: block;
-		margin-top: 2px;
-		color: #656d68;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-	}
-
-	.phase-rail {
-		padding: 4px 13px 10px;
-		display: grid;
-		grid-template-columns: repeat(6, minmax(0, 1fr));
-	}
-
-	.phase {
-		min-width: 0;
-		position: relative;
-	}
-
-	.phase-node {
-		width: 18px;
-		height: 18px;
-		display: grid;
-		place-items: center;
-		border: 1px solid #3d4440;
-		border-radius: 50%;
-		background: #101312;
-		color: #626a65;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 6px;
-		position: relative;
-		z-index: 2;
-	}
-
-	.phase > i {
-		position: absolute;
-		top: 8px;
-		left: 18px;
-		right: 0;
-		height: 1px;
-		background: #303532;
-	}
-
-	.phase-complete .phase-node {
-		border-color: var(--lime);
-		background: var(--lime);
-		color: #11150e;
-	}
-
-	.phase-complete > i {
-		background: var(--lime);
-	}
-
-	.phase-active .phase-node {
-		border-color: var(--cyan);
-		background: rgba(105, 216, 218, 0.12);
-		color: var(--cyan);
-		box-shadow: 0 0 0 4px rgba(105, 216, 218, 0.07);
-		animation: phase-pulse 1.8s ease-in-out infinite;
-	}
-
-	.phase-attention .phase-node {
-		border-color: var(--amber);
-		background: rgba(255, 180, 84, 0.15);
-		color: var(--amber);
-	}
-
-	.phase-failed .phase-node {
-		border-color: var(--red);
-		background: rgba(255, 107, 95, 0.14);
-		color: var(--red);
-	}
-
-	.phase-copy {
-		margin-top: 5px;
-		padding-right: 3px;
-	}
-
-	.phase-copy strong,
-	.phase-copy small {
-		display: block;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.phase-copy strong {
-		color: #626a65;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 6px;
-		letter-spacing: 0.45px;
-	}
-
-	.phase-copy small {
-		display: none;
-	}
-
-	.phase-active .phase-copy strong {
-		color: var(--cyan);
-	}
-
-	.phase-complete .phase-copy strong {
-		color: #9fb779;
-	}
-
-	.phase-attention .phase-copy strong {
-		color: var(--amber);
-	}
-
-	.phase-failed .phase-copy strong {
-		color: var(--red);
-	}
-
-	.run-facts {
-		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		border-top: 1px solid #202522;
-	}
-
-	.run-facts div {
-		min-width: 0;
-		padding: 7px 10px;
-		border-right: 1px solid #202522;
-	}
-
-	.run-facts div:last-child {
-		border-right: 0;
-	}
-
-	.run-facts span,
-	.run-facts strong {
-		display: block;
-		font-family: 'JetBrainsMono', monospace;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.run-facts span {
-		color: #5e6661;
-		font-size: 6px;
-		letter-spacing: 0.65px;
-	}
-
-	.run-facts strong {
-		margin-top: 3px;
-		color: #b8bfba;
-		font-size: 8px;
-	}
-
-	.run-facts strong.warn {
-		color: var(--amber);
-	}
-
-	.run-facts strong.error {
-		color: var(--red);
-	}
-
-	.task-controls {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.stop-button,
-	.resume-button {
-		padding: 6px 8px;
-		border: 1px solid #3c423f;
-		background: transparent;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		cursor: pointer;
-	}
-
-	.stop-button {
-		color: var(--red);
-	}
-
-	.resume-button {
-		color: var(--lime);
-	}
-
-	.activity-feed {
-		padding: 15px 14px 20px;
-	}
-
-	.activity-empty {
-		height: 100%;
-	}
-
-	.radar {
-		width: 62px;
-		height: 62px;
-		border: 1px solid #333936;
-		border-radius: 50%;
-		display: grid;
-		place-items: center;
-		position: relative;
-		background: radial-gradient(circle, rgba(199, 243, 107, 0.12), transparent 60%);
-	}
-
-	.radar::before,
-	.radar::after {
-		content: '';
-		position: absolute;
-		background: #333936;
-	}
-
-	.radar::before {
-		width: 100%;
-		height: 1px;
-	}
-
-	.radar::after {
-		width: 1px;
-		height: 100%;
-	}
-
-	.radar span {
-		width: 5px;
-		height: 5px;
-		border-radius: 50%;
-		background: var(--lime);
-		box-shadow: 0 0 12px var(--lime);
-	}
-
-	.permission-card {
-		margin-bottom: 14px;
-		padding: 12px;
-		border: 1px solid rgba(255, 180, 84, 0.55);
-		background: rgba(255, 180, 84, 0.06);
-		display: grid;
-		grid-template-columns: 26px 1fr;
-		gap: 10px;
-	}
-
-	.permission-signal {
-		width: 24px;
-		height: 24px;
-		display: grid;
-		place-items: center;
-		border: 1px solid var(--amber);
-		color: var(--amber);
-		font-family: 'JetBrainsMono', monospace;
-		font-weight: 900;
-	}
-
-	.permission-content > span {
-		color: var(--amber);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.8px;
-	}
-
-	.permission-content > strong {
-		display: block;
-		margin-top: 5px;
-		font-size: 11px;
-	}
-
-	.permission-content pre,
-	.event-card pre {
-		white-space: pre-wrap;
-		word-break: break-word;
-		font-family: 'JetBrainsMono', monospace;
-	}
-
-	.permission-content pre {
-		max-height: 100px;
-		padding: 8px;
-		overflow: auto;
-		background: rgba(0, 0, 0, 0.28);
-		color: #c0c6c2;
-		font-size: 8px;
-	}
-
-	.permission-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 5px;
-	}
-
-	.permission-actions button {
-		padding: 6px 7px;
-		border: 1px solid #494f4c;
-		background: transparent;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		cursor: pointer;
-	}
-
-	.permission-actions button.primary {
-		border-color: var(--amber);
-		background: var(--amber);
-		color: #17110b;
-	}
-
-	.worklog-toolbar {
-		margin: 2px 0 12px;
-		padding-bottom: 9px;
-		display: flex;
-		align-items: flex-end;
-		justify-content: space-between;
-		gap: 10px;
-		border-bottom: 1px solid #252a27;
-	}
-
-	.worklog-toolbar > div:first-child strong {
-		display: block;
-		margin-top: 3px;
-		color: #aab1ad;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		font-weight: 500;
-	}
-
-	.event-filters {
-		display: flex;
-		gap: 3px;
-	}
-
-	.event-filters button {
-		padding: 4px 6px;
-		border: 1px solid transparent;
-		background: transparent;
-		color: #626a65;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 6px;
-		letter-spacing: 0.3px;
-		text-transform: uppercase;
-		cursor: pointer;
-	}
-
-	.event-filters button:hover {
-		color: #aab1ad;
-	}
-
-	.event-filters button.active {
-		border-color: #3b423e;
-		background: #181c1a;
-		color: var(--lime);
-	}
-
-	.event-row {
-		display: grid;
-		grid-template-columns: 18px minmax(0, 1fr);
-	}
-
-	.timeline {
-		position: relative;
-	}
-
-	.timeline::after {
-		content: '';
-		position: absolute;
-		top: 13px;
-		bottom: -13px;
-		left: 4px;
-		width: 1px;
-		background: #2a2f2c;
-	}
-
-	.event-row:last-child .timeline::after {
-		display: none;
-	}
-
-	.timeline span {
-		position: absolute;
-		top: 8px;
-		left: 1px;
-		width: 7px;
-		height: 7px;
-		border: 1px solid #59605c;
-		border-radius: 50%;
-		background: #0c0e0e;
-	}
-
-	.timeline span.event-active {
-		border-color: var(--lime);
-		background: var(--lime);
-		box-shadow: 0 0 8px rgba(199, 243, 107, 0.45);
-	}
-
-	.event-card {
-		min-width: 0;
-		margin-bottom: 11px;
-		padding: 8px 10px;
-		border: 1px solid #242927;
-		background: #111413;
-	}
-
-	.event-meta strong {
-		display: inline;
-		font-size: 9px;
-		font-weight: 600;
-	}
-
-	.event-meta > div {
-		min-width: 0;
-		display: flex;
-		align-items: center;
-		gap: 7px;
-	}
-
-	.event-kind {
-		flex: none;
-		min-width: 42px;
-		padding: 3px 4px 2px;
-		border: 1px solid #353b38;
-		color: #7d8580;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 5px;
-		font-weight: 800;
-		letter-spacing: 0.45px;
-		text-align: center;
-	}
-
-	.event-kind.kind-change,
-	.event-kind.kind-result {
-		border-color: rgba(199, 243, 107, 0.38);
-		color: var(--lime);
-	}
-
-	.event-kind.kind-tool,
-	.event-kind.kind-shell {
-		border-color: rgba(105, 216, 218, 0.38);
-		color: var(--cyan);
-	}
-
-	.event-kind.kind-approval {
-		border-color: rgba(255, 180, 84, 0.45);
-		color: var(--amber);
-	}
-
-	.event-kind.kind-issue {
-		border-color: rgba(255, 107, 95, 0.5);
-		color: var(--red);
-	}
-
-	.event-meta time {
-		color: #555d58;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-	}
-
-	.event-card pre {
-		margin: 7px 0 0;
-		color: #a4aba7;
-		font-size: 8px;
-		line-height: 1.55;
-	}
-
-	.event-agent-terminal-output {
-		border-left-color: var(--cyan);
-		background: #0d1212;
-	}
-
-	.event-agent-failed {
-		border-left-color: var(--red);
-	}
-
-	.prompt-bar {
-		min-height: 48px;
-		padding: 7px 9px;
-		border-top: 1px solid var(--line);
-		display: grid;
-		grid-template-columns: auto 1fr auto;
-		gap: 7px;
-		align-items: center;
-		background: #101312;
-	}
-
-	.prompt-bar > span {
-		color: var(--lime);
-		font-family: 'JetBrainsMono', monospace;
-	}
-
-	.prompt-bar input {
-		height: 32px;
-		border: 0;
-		outline: 0;
-		background: transparent;
-		color: var(--ink);
-		font-size: 9px;
-	}
-
-	.prompt-bar button {
-		width: 28px;
-		height: 28px;
-		border: 1px solid #363d39;
-		background: #1a1e1c;
-		color: var(--lime);
-		cursor: pointer;
-	}
-
-	.inspector {
-		display: grid;
-		grid-template-rows: 55px minmax(0, 1fr);
-	}
-
-	.inspector-tabs {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.inspector-tabs button {
-		border: 0;
-		border-right: 1px solid #202422;
-		background: transparent;
-		color: #656d68;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.65px;
-		cursor: pointer;
-		position: relative;
-	}
-
-	.inspector-tabs button.active {
-		color: var(--ink);
-		background: #141716;
-	}
-
-	.inspector-tabs button.active::after {
-		content: '';
-		position: absolute;
-		bottom: -1px;
-		left: 20%;
-		right: 20%;
-		height: 2px;
-		background: var(--lime);
-	}
-
-	.inspector-body {
-		min-height: 0;
-		overflow: auto;
-	}
-
-	.change-summary {
-		padding: 16px;
-		border-bottom: 1px solid var(--line);
-	}
-
-	.change-summary strong {
-		display: block;
-		margin-top: 7px;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 9px;
-	}
-
-	.change-summary p {
-		margin: 5px 0 0;
-		color: #666e69;
-		font-size: 8px;
-		word-break: break-all;
-	}
-
-	.file-summary {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		border-bottom: 1px solid var(--line);
-	}
-
-	.file-summary div {
-		padding: 12px 10px;
-		border-right: 1px solid var(--line);
-	}
-
-	.file-summary span,
-	.file-summary strong {
-		display: block;
-	}
-
-	.file-summary span {
-		color: #626964;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 6px;
-		letter-spacing: 0.6px;
-	}
-
-	.file-summary strong {
-		margin-top: 5px;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 11px;
-	}
-
-	.file-summary .plus {
-		color: var(--lime);
-	}
-
-	.file-summary .minus {
-		color: var(--red);
-	}
-
-	.changed-files {
-		border-bottom: 1px solid var(--line);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-	}
-
-	.changed-files div {
-		display: flex;
-		gap: 9px;
-		padding: 10px 12px;
-		border-bottom: 1px solid #171c19;
-		word-break: break-all;
-	}
-
-	.changed-files span {
-		color: var(--lime);
-	}
-
-	.diff-preview {
-		max-height: 360px;
-		margin: 0;
-		padding: 12px;
-		overflow: auto;
-		background: #080a0a;
-		color: #abb4ae;
-		font:
-			7px/1.6 'JetBrainsMono',
-			monospace;
-		white-space: pre-wrap;
-	}
-
-	.inspector-empty {
-		min-height: 260px;
-		padding: 20px;
-	}
-
-	.inspector-empty svg {
-		width: 29px;
-		color: #4e5551;
-	}
-
-	.terminal {
-		min-height: 100%;
-		padding: 16px;
-		background: #080a0a;
-		color: #aab2ad;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		line-height: 1.8;
-	}
-
-	.terminal-line span {
-		display: inline-block;
-		width: 70px;
-		color: var(--lime);
-	}
-
-	.terminal-line.muted {
-		color: #555d58;
-	}
-
-	.terminal-line.cursor {
-		margin-top: 8px;
-		color: var(--lime);
-		animation: blink 1s steps(1) infinite;
-	}
-
-	.context-list {
-		margin: 0;
-	}
-
-	.context-list div {
-		padding: 14px;
-		border-bottom: 1px solid var(--line);
-	}
-
-	.context-list dt {
-		color: #5f6762;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.8px;
-	}
-
-	.context-list dd {
-		margin: 6px 0 0;
-		color: #bec4c0;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 9px;
-		word-break: break-all;
-	}
-
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		z-index: 100;
-		display: grid;
-		place-items: center;
-		padding: 24px;
-		background: rgba(5, 7, 7, 0.78);
-		backdrop-filter: blur(8px);
-	}
-
-	.modal {
-		width: min(500px, 100%);
-		padding: 27px;
-		border: 1px solid #3b423e;
-		background: linear-gradient(135deg, rgba(199, 243, 107, 0.035), transparent 42%), #121514;
-		box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
-	}
-
-	.modal-index {
-		color: var(--lime);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		letter-spacing: 1.2px;
-	}
-
-	.modal h2 {
-		margin: 8px 0 3px;
-		font-family: 'InstrumentSerif', serif;
-		font-size: 34px;
-		font-weight: 400;
-	}
-
-	.modal > p {
-		margin: 0 0 22px;
-		color: #7d8580;
-		font-size: 10px;
-		line-height: 1.6;
-	}
-
-	.modal label {
-		display: block;
-		margin-top: 13px;
-	}
-
-	.modal label > span {
-		display: block;
-		margin-bottom: 6px;
-		color: #777f7a;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 7px;
-		letter-spacing: 0.9px;
-	}
-
-	.modal input,
-	.modal textarea,
-	.modal select {
-		width: 100%;
-		border: 1px solid #343a37;
-		outline: 0;
-		background: #0b0e0d;
-		color: var(--ink);
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 10px;
-	}
-
-	.modal input,
-	.modal select {
-		height: 41px;
-		padding: 0 11px;
-	}
-
-	.modal textarea {
-		padding: 11px;
-		resize: vertical;
-		line-height: 1.6;
-	}
-
-	.modal input:focus,
-	.modal textarea:focus,
-	.modal select:focus {
-		border-color: var(--lime);
-		box-shadow: 0 0 0 2px rgba(199, 243, 107, 0.08);
-	}
-
-	.modal-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 7px;
-		margin-top: 23px;
-		padding-top: 17px;
-		border-top: 1px solid var(--line);
-	}
-
-	.modal-actions button {
-		height: 36px;
-		padding: 0 13px;
-		border: 1px solid #3c433f;
-		background: transparent;
-		font-family: 'JetBrainsMono', monospace;
-		font-size: 8px;
-		font-weight: 700;
-		cursor: pointer;
-	}
-
-	.modal-actions button.primary {
-		border-color: var(--lime);
-		background: var(--lime);
-		color: #11140e;
-	}
-
-	.modal-actions button:disabled {
-		opacity: 0.5;
-	}
-
-	@keyframes pulse {
-		0%,
-		100% {
-			opacity: 0.6;
-		}
-		50% {
-			opacity: 1;
-		}
-	}
-
-	@keyframes loading {
-		to {
-			background-position: -200% 0;
-		}
-	}
-
-	@keyframes blink {
-		50% {
-			opacity: 0;
-		}
-	}
-
-	@keyframes phase-pulse {
-		0%,
-		100% {
-			box-shadow: 0 0 0 3px rgba(105, 216, 218, 0.04);
-		}
-		50% {
-			box-shadow: 0 0 0 5px rgba(105, 216, 218, 0.11);
-		}
-	}
-
-	@media (max-width: 1120px) {
-		.topbar {
-			grid-template-columns: 220px 1fr 170px;
-		}
-
-		.workspace {
-			grid-template-columns: 58px 185px minmax(0, 1fr);
-		}
-
-		.command-grid {
-			grid-template-columns: 210px minmax(330px, 1fr);
-		}
-
-		.inspector {
-			display: none;
-		}
-	}
-
-	@media (max-width: 760px) {
-		.topbar {
-			grid-template-columns: 1fr auto;
-		}
-
-		.topbar-center {
-			display: none;
-		}
-
-		.topbar-actions {
-			border-left: 0;
-		}
-
-		.workspace {
-			grid-template-columns: 52px minmax(0, 1fr);
-		}
-
-		.project-panel {
-			display: none;
-		}
-
-		.main-stage {
-			grid-template-rows: 84px 58px minmax(0, 1fr);
-		}
-
-		.stage-header {
-			padding: 0 13px;
-		}
-
-		.new-task-button {
-			min-width: 42px;
-			width: 42px;
-			font-size: 0;
-		}
-
-		.new-task-button span {
-			margin: 0;
-			font-size: 18px;
-		}
-
-		.new-task-button kbd {
-			display: none;
-		}
-
-		.metric-strip .metric:nth-child(n + 3) {
-			display: none;
-		}
-
-		.metric-strip {
-			grid-template-columns: 1fr 1fr;
-		}
-
-		.command-grid {
-			grid-template-columns: 1fr;
-		}
-
-		.task-column {
-			display: none;
-		}
-
-		.activity-column {
-			border-right: 0;
-		}
+	:global(body) { overflow: hidden; }
+	:global(.dark) .openm-chat { --bg: #0d0e0f; --panel: #141516; --raised: #1b1d1f; --line: #2a2c2f; --text: #f2f3ef; --muted: #989c96; --soft: #71756f; --bubble: #202225; --input: #1c1e20; }
+	.openm-chat { --bg: #f7f7f5; --panel: #fff; --raised: #f2f3f0; --line: #e3e4df; --text: #20221f; --muted: #73776f; --soft: #989b95; --bubble: #e9eae6; --input: #fff; --accent: #9ee63b; --accent-strong: #669e18; height: 100dvh; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+	button, select, textarea, input { font: inherit; }
+	button { color: inherit; }
+	svg { width: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+	.chat-header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(16px); position: relative; z-index: 30; }
+	.header-left, .header-actions, .header-center { display: flex; align-items: center; }
+	.header-left { gap: 11px; min-width: 220px; }
+	.agent-mark, .empty-mark, .openm-avatar { display: flex; align-items: end; gap: 3px; }
+	.agent-mark { width: 32px; height: 32px; padding: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+	.agent-mark span, .empty-mark span, .openm-avatar span { width: 4px; background: var(--accent); border-radius: 3px; }
+	.agent-mark span:nth-child(1), .openm-avatar span:nth-child(1) { height: 8px; }
+	.agent-mark span:nth-child(2), .openm-avatar span:nth-child(2) { height: 14px; }
+	.agent-mark span:nth-child(3), .openm-avatar span:nth-child(3) { height: 11px; }
+	.title-stack { display: flex; flex-direction: column; line-height: 1.15; }
+	.title-stack strong { font-size: 15px; letter-spacing: -.02em; }
+	.title-stack span { margin-top: 4px; font-size: 10px; color: var(--muted); }
+	.header-center { gap: 7px; font-size: 11px; color: var(--muted); }
+	.header-center i { width: 1px; height: 14px; margin: 0 5px; background: var(--line); }
+	.presence { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); flex: none; }
+	.header-actions { justify-content: flex-end; gap: 8px; min-width: 220px; }
+	.header-actions button, .icon-button { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; height: 36px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+	.artifact-button, .new-button { gap: 7px; padding: 0 11px; font-size: 12px; font-weight: 600; }
+	.new-button { background: var(--text) !important; color: var(--bg) !important; border-color: var(--text) !important; }
+	.icon-button { width: 36px; padding: 0; }
+	button:disabled { opacity: .4; cursor: not-allowed; }
+	.app-body { display: flex; height: calc(100dvh - 64px); overflow: hidden; position: relative; }
+	.thread-sidebar { width: 250px; flex: none; border-right: 1px solid var(--line); background: var(--panel); padding: 16px 12px 12px; display: flex; flex-direction: column; z-index: 22; }
+	.project-switcher { display: grid; grid-template-columns: 1fr 32px; gap: 6px; position: relative; }
+	.project-switcher label { grid-column: 1 / -1; font-size: 9px; letter-spacing: .13em; color: var(--soft); font-weight: 700; padding-left: 2px; }
+	.select-wrap { position: relative; }
+	.select-wrap select { width: 100%; height: 36px; border: 1px solid var(--line); border-radius: 8px; appearance: none; background: var(--bg); color: var(--text); padding: 0 28px 0 10px; font-size: 12px; font-weight: 600; }
+	.select-wrap svg { width: 14px; position: absolute; right: 8px; top: 11px; pointer-events: none; }
+	.connect-button { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 20px; cursor: pointer; }
+	.sidebar-new { margin: 12px 0 18px; height: 39px; border: 0; border-radius: 9px; background: var(--text); color: var(--bg); display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; font-weight: 700; cursor: pointer; }
+	.sidebar-new svg { width: 16px; }
+	.thread-label { display: flex; justify-content: space-between; padding: 0 4px 8px; color: var(--soft); font-size: 9px; letter-spacing: .12em; }
+	.thread-label b { letter-spacing: 0; }
+	.thread-list { overflow-y: auto; flex: 1; }
+	.thread { width: 100%; display: flex; gap: 9px; align-items: flex-start; padding: 10px 9px; border: 0; background: transparent; border-radius: 9px; text-align: left; cursor: pointer; }
+	.thread:hover { background: var(--raised); }
+	.thread.active { background: var(--bubble); }
+	.thread-status { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--soft); flex: none; }
+	.thread-status.status-running, .thread-status.status-preparing, .thread-status.status-queued { background: var(--accent); }
+	.thread-status.status-waiting_permission { background: #f3ab3b; }
+	.thread-status.status-failed { background: #ef665f; }
+	.thread-copy { min-width: 0; display: flex; flex-direction: column; }
+	.thread-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+	.thread-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+	.no-threads { padding: 16px 8px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+	.skeleton { height: 44px; margin: 5px; border-radius: 8px; background: var(--raised); animation: pulse 1.5s infinite; }
+	.skeleton.short { width: 72%; }
+	.sandbox-note { border-top: 1px solid var(--line); padding: 13px 5px 2px; display: flex; align-items: center; gap: 9px; }
+	.sandbox-note div { display: flex; flex-direction: column; font-size: 10px; }
+	.sandbox-note small { margin-top: 2px; color: var(--muted); }
+	.conversation { min-width: 0; flex: 1; display: flex; flex-direction: column; background: var(--bg); position: relative; transition: margin .2s ease; }
+	.messages { flex: 1; overflow-y: auto; scrollbar-width: thin; }
+	.conversation-inner { max-width: 820px; margin: 0 auto; padding: 48px 28px 160px; }
+	.task-meta { display: flex; gap: 8px; color: var(--soft); font-size: 10px; margin: 0 0 28px 54px; }
+	.task-meta i { font-style: normal; }
+	.user-message, .agent-message { display: grid; grid-template-columns: 36px 1fr; gap: 16px; }
+	.user-message { margin-bottom: 42px; }
+	.user-avatar, .openm-avatar { width: 34px; height: 34px; border-radius: 10px; }
+	.user-avatar { display: grid; place-items: center; background: var(--bubble); font-size: 8px; font-weight: 800; color: var(--muted); }
+	.openm-avatar { box-sizing: border-box; align-items: end; justify-content: center; padding: 8px; background: var(--text); }
+	.message-author { height: 28px; display: flex; align-items: center; gap: 9px; }
+	.message-author strong { font-size: 13px; }
+	.message-author time, .model-name { color: var(--muted); font-size: 10px; }
+	.user-message p { margin: 5px 0 0; white-space: pre-wrap; font-size: 15px; line-height: 1.7; }
+	.agent-content { min-width: 0; }
+	.run-card, .activity-card, .result-card, .approval-card { margin-top: 9px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); overflow: hidden; }
+	.run-card { padding: 18px 18px 14px; position: relative; }
+	.run-card.attention { border-color: #d9a74c; }
+	.run-card-head { display: flex; justify-content: space-between; gap: 15px; }
+	.run-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
+	.run-status i { width: 7px; height: 7px; background: var(--accent); border-radius: 50%; }
+	.run-status.status-failed i, .run-status.status-cancelled i { background: #ef665f; }
+	.run-status.status-waiting_permission i { background: #f3ab3b; }
+	.run-copy h2 { margin: 8px 0 4px; font-size: 15px; line-height: 1.35; }
+	.run-copy p { margin: 0; color: var(--muted); font-size: 10px; }
+	.progress-number { font-size: 31px; font-weight: 500; letter-spacing: -.06em; }
+	.progress-number small { font-size: 11px; color: var(--muted); margin-left: 2px; }
+	.progress-track { height: 3px; margin-top: 17px; background: var(--raised); border-radius: 3px; overflow: hidden; }
+	.progress-track span { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+	.phase-list { display: grid; grid-template-columns: repeat(6, 1fr); margin-top: 11px; }
+	.phase { display: flex; align-items: center; gap: 4px; color: var(--soft); }
+	.phase span { width: 13px; height: 13px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: 8px; }
+	.phase small { font-size: 8px; }
+	.phase-complete { color: var(--accent-strong); }
+	.phase-complete span { background: var(--accent); border-color: var(--accent); color: #182006; }
+	.phase-active { color: var(--text); font-weight: 700; }
+	.phase-active span { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+	.phase-attention { color: #c48a29; }
+	.phase-failed { color: #d84d47; }
+	.text-action { border: 0; background: transparent; color: var(--accent-strong); padding: 12px 0 0; font-size: 10px; cursor: pointer; }
+	.text-action.danger { color: #d84d47; }
+	.activity-card summary { list-style: none; padding: 14px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+	.activity-card summary::-webkit-details-marker { display: none; }
+	.activity-symbol { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; background: var(--raised); color: var(--accent-strong); }
+	.activity-card summary div { display: flex; flex: 1; flex-direction: column; }
+	.activity-card summary strong { font-size: 11px; }
+	.activity-card summary small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+	.activity-card summary svg { width: 15px; transition: transform .2s; }
+	.activity-card[open] summary svg { transform: rotate(180deg); }
+	.activity-list { border-top: 1px solid var(--line); padding: 8px 16px 12px; max-height: 330px; overflow-y: auto; }
+	.activity-row { display: grid; grid-template-columns: 14px 1fr; gap: 8px; min-height: 42px; }
+	.activity-line { position: relative; border-left: 1px solid var(--line); margin-left: 4px; }
+	.activity-line span { position: absolute; left: -4px; top: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--soft); }
+	.activity-line span.live { background: var(--accent); }
+	.activity-row > div:last-child { padding: 5px 0 10px; min-width: 0; position: relative; }
+	.activity-row strong { font-size: 10px; font-weight: 600; }
+	.activity-row time { position: absolute; right: 0; top: 7px; color: var(--soft); font-size: 8px; }
+	.activity-row pre { margin: 5px 50px 0 0; color: var(--muted); font: 9px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 80px; overflow: hidden; }
+	.approval-card { padding: 16px; display: grid; grid-template-columns: 32px 1fr; gap: 12px; border-color: #d9a74c; }
+	.approval-icon { width: 30px; height: 30px; border-radius: 9px; background: #f3ab3b; color: #281900; display: grid; place-items: center; font-weight: 900; }
+	.approval-card span { font-size: 9px; color: #c48a29; font-weight: 700; }
+	.approval-card h3 { margin: 4px 0 9px; font-size: 13px; }
+	.approval-card pre { margin: 0; padding: 9px; border-radius: 7px; background: var(--raised); font: 9px/1.5 ui-monospace, monospace; max-height: 110px; overflow: auto; }
+	.approval-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+	.approval-actions button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); font-size: 9px; font-weight: 700; cursor: pointer; }
+	.approval-actions .primary { background: var(--text); color: var(--bg); }
+	.result-card { padding: 16px; }
+	.result-head { display: flex; gap: 10px; align-items: center; }
+	.success-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #182006; font-weight: 800; }
+	.result-head div:last-child { display: flex; flex-direction: column; }
+	.result-head span { color: var(--accent-strong); font-size: 9px; font-weight: 700; }
+	.result-head strong { margin-top: 3px; font-size: 13px; }
+	.result-card > p { margin: 13px 0; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
+	.result-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+	.result-facts div { background: var(--bg); padding: 10px; display: flex; flex-direction: column; }
+	.result-facts span { color: var(--muted); font-size: 8px; }
+	.result-facts strong { margin-top: 4px; font-size: 11px; }
+	.view-work { width: 100%; height: 36px; margin-top: 11px; border: 0; border-radius: 8px; background: var(--text); color: var(--bg); display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 10px; font-weight: 700; cursor: pointer; }
+	.view-work svg { width: 14px; }
+	.empty-chat { min-height: calc(100dvh - 210px); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 35px 24px; text-align: center; }
+	.empty-mark { height: 49px; align-items: end; gap: 6px; margin-bottom: 23px; }
+	.empty-mark span { width: 8px; }
+	.empty-mark span:nth-child(1) { height: 25px; }.empty-mark span:nth-child(2) { height: 47px; }.empty-mark span:nth-child(3) { height: 34px; }
+	.empty-chat h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.055em; font-weight: 650; }
+	.empty-chat p { margin: 15px 0 27px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+	.suggestions { width: min(100%, 530px); display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+	.suggestions button { min-height: 68px; padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); text-align: left; font-size: 10px; cursor: pointer; }
+	.suggestions button:hover { border-color: var(--soft); transform: translateY(-1px); }
+	.suggestions span { display: block; color: var(--accent-strong); font: 9px ui-monospace, monospace; margin-bottom: 9px; }
+	.composer-area { position: absolute; z-index: 10; bottom: 0; left: 0; right: 0; padding: 30px 24px 10px; background: linear-gradient(transparent, var(--bg) 35%); }
+	.composer { max-width: 760px; margin: 0 auto; padding: 11px 12px 9px; border: 1px solid var(--line); border-radius: 17px; background: var(--input); box-shadow: 0 10px 35px rgba(0,0,0,.08); }
+	.composer:focus-within { border-color: color-mix(in srgb, var(--soft) 70%, var(--line)); }
+	.composer textarea { display: block; width: 100%; min-height: 27px; max-height: 180px; resize: none; box-sizing: border-box; padding: 4px 5px 8px; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 14px; line-height: 1.5; }
+	.composer textarea::placeholder { color: var(--soft); }
+	.composer-tools, .composer-tools > div { display: flex; align-items: center; justify-content: space-between; }
+	.composer-tools > div { gap: 5px; }
+	.tool-button { width: 29px; height: 29px; border: 1px solid var(--line); border-radius: 8px; background: transparent; display: grid; place-items: center; cursor: pointer; }
+	.tool-button svg { width: 15px; }
+	.composer select { height: 29px; padding: 0 7px; border: 0; border-radius: 7px; background: var(--raised); color: var(--muted); font-size: 9px; outline: 0; }
+	.send-button { width: 31px; height: 31px; border: 0; border-radius: 9px; background: var(--text); color: var(--bg); display: grid; place-items: center; cursor: pointer; }
+	.send-button svg { width: 17px; }
+	.composer-area > p { margin: 6px auto 0; text-align: center; color: var(--soft); font-size: 8px; }
+	.spinner { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--bg) 35%, transparent); border-top-color: var(--bg); border-radius: 50%; animation: spin .7s linear infinite; }
+	.inspector { width: 0; flex: none; overflow: hidden; background: var(--panel); border-left: 0 solid var(--line); transition: width .22s ease; z-index: 21; }
+	.inspector.open { width: min(390px, 34vw); border-left-width: 1px; }
+	.inspector-head { height: 62px; padding: 0 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+	.inspector-head > div { display: flex; flex-direction: column; }
+	.inspector-head span { color: var(--soft); font-size: 8px; letter-spacing: .13em; }
+	.inspector-head strong { margin-top: 4px; font-size: 13px; }
+	.inspector-tabs { display: grid; grid-template-columns: repeat(3,1fr); padding: 10px 12px 0; border-bottom: 1px solid var(--line); }
+	.inspector-tabs button { padding: 9px 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+	.inspector-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+	.inspector-body { height: calc(100% - 112px); overflow: auto; padding: 16px; }
+	.inspector-summary { display: flex; flex-direction: column; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+	.inspector-summary span { color: var(--soft); font-size: 8px; letter-spacing: .1em; }
+	.inspector-summary strong { margin-top: 7px; font-size: 11px; overflow-wrap: anywhere; }
+	.inspector-summary small { margin-top: 5px; color: var(--muted); font: 8px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+	.file-list { padding: 10px 0; }
+	.file-list div { padding: 8px 3px; display: flex; gap: 8px; border-bottom: 1px solid var(--line); font-size: 9px; overflow-wrap: anywhere; }
+	.file-list span { color: var(--accent-strong); font-family: ui-monospace, monospace; }
+	.diff, .terminal { margin: 10px 0 0; padding: 12px; border-radius: 9px; background: #0c0e0d; color: #b9c1b5; font: 9px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+	.diff { max-height: 55vh; }
+	.terminal { min-height: 260px; }
+	.terminal pre { margin: 10px 0; color: inherit; white-space: pre-wrap; }
+	.terminal-command { color: var(--accent); }
+	.cursor { display: inline-block; width: 6px; height: 11px; background: var(--accent); animation: pulse 1s infinite; }
+	.context { margin: 0; }
+	.context div { display: grid; grid-template-columns: 88px 1fr; gap: 8px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 10px; }
+	.context dt { color: var(--muted); }
+	.context dd { margin: 0; overflow-wrap: anywhere; }
+	.inspector-empty { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--muted); }
+	.inspector-empty > span { font-size: 28px; color: var(--soft); }
+	.inspector-empty strong { margin-top: 12px; color: var(--text); font-size: 11px; }
+	.inspector-empty p { max-width: 190px; font-size: 9px; line-height: 1.6; }
+	.modal-backdrop, .mobile-scrim { position: fixed; inset: 0; border: 0; background: rgba(0,0,0,.55); z-index: 80; }
+	.modal { width: min(430px, calc(100vw - 32px)); box-sizing: border-box; position: fixed; z-index: 81; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 24px; border: 1px solid var(--line); border-radius: 17px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px rgba(0,0,0,.25); }
+	.modal-kicker { color: var(--accent-strong); font-size: 9px; letter-spacing: .14em; font-weight: 800; }
+	.modal h2 { margin: 8px 0; font-size: 22px; letter-spacing: -.03em; }
+	.modal > p { margin: 0 0 20px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+	.modal label { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+	.modal label span { color: var(--muted); font-size: 9px; font-weight: 700; }
+	.modal input { height: 40px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--text); padding: 0 11px; outline: 0; font-size: 12px; }
+	.modal input:focus { border-color: var(--accent-strong); }
+	.modal-actions { margin-top: 20px; display: flex; justify-content: flex-end; gap: 7px; }
+	.modal-actions button { padding: 9px 13px; border: 1px solid var(--line); border-radius: 8px; background: transparent; font-size: 10px; cursor: pointer; }
+	.modal-actions .primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+	.mobile-only, .mobile-scrim { display: none; }
+	@keyframes spin { to { transform: rotate(360deg); } }
+	@keyframes pulse { 50% { opacity: .45; } }
+
+	@media (max-width: 960px) {
+		.header-center { display: none; }
+		.inspector { position: absolute; right: 0; top: 0; bottom: 0; box-shadow: -18px 0 40px rgba(0,0,0,.15); }
+		.inspector.open { width: min(420px, 78vw); }
+	}
+	@media (max-width: 720px) {
+		.chat-header { height: 56px; padding: 0 10px; }
+		.app-body { height: calc(100dvh - 56px); }
+		.header-left, .header-actions { min-width: 0; }
+		.mobile-only { display: inline-flex; }
+		.title-stack span, .artifact-button span, .new-button span { display: none; }
+		.agent-mark { display: none; }
+		.header-actions button { width: 36px; padding: 0; }
+		.thread-sidebar { position: absolute; left: 0; top: 0; bottom: 0; width: min(290px, 86vw); transform: translateX(-102%); transition: transform .2s ease; box-shadow: 16px 0 45px rgba(0,0,0,.2); }
+		.thread-sidebar.open { transform: translateX(0); }
+		.mobile-scrim { display: block; position: absolute; z-index: 20; }
+		.conversation-inner { padding: 28px 16px 150px; }
+		.task-meta { margin: 0 0 21px; }
+		.user-message, .agent-message { grid-template-columns: 30px 1fr; gap: 10px; }
+		.user-avatar, .openm-avatar { width: 29px; height: 29px; border-radius: 8px; }
+		.openm-avatar { padding: 7px; }
+		.user-message { margin-bottom: 30px; }
+		.user-message p { font-size: 14px; }
+		.run-card { padding: 14px 13px 12px; }
+		.progress-number { font-size: 25px; }
+		.phase-list { grid-template-columns: repeat(3, 1fr); gap: 8px 4px; }
+		.phase small { font-size: 7px; }
+		.activity-card summary { padding: 12px; }
+		.activity-list { padding-left: 12px; padding-right: 12px; }
+		.result-facts { grid-template-columns: 1fr; }
+		.result-facts div { flex-direction: row; align-items: center; justify-content: space-between; }
+		.composer-area { padding: 24px 10px 7px; }
+		.composer { border-radius: 15px; }
+		.composer-area > p { display: none; }
+		.empty-chat { min-height: calc(100dvh - 175px); padding: 25px 18px; }
+		.empty-chat p br { display: none; }
+		.suggestions { grid-template-columns: 1fr; max-width: 330px; }
+		.suggestions button { min-height: 48px; }
+		.suggestions span { display: inline; margin-right: 8px; }
+		.inspector { position: absolute; left: 0; width: 100%; transform: translateY(102%); top: 16%; border: 1px solid var(--line); border-radius: 18px 18px 0 0; transition: transform .22s ease; box-shadow: 0 -18px 50px rgba(0,0,0,.25); }
+		.inspector.open { width: 100%; transform: translateY(0); }
 	}
 </style>
