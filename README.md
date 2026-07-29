@@ -1,3 +1,5 @@
+![OpenM — Personal AI Workspace](./docs/assets/openm-repository-header.png)
+
 # OpenM
 
 OpenM is a self-hosted coding-agent workspace built from Open WebUI `v0.6.5`.
