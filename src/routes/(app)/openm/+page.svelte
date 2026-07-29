@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 
 	import {
 		cancelOpenMTask,
@@ -737,7 +738,13 @@
 											<span></span>
 											<strong>{finalResponse ? '回答' : 'Claude Codeが入力中'}</strong>
 										</div>
-										<p>{displayedResponse}{#if !finalResponse}<i class="text-cursor"></i>{/if}</p>
+										<div class="response-markdown markdown-prose">
+											<Markdown
+												id={`openm-response-${selectedTask.id}`}
+												content={displayedResponse}
+											/>
+											{#if !finalResponse}<i class="text-cursor"></i>{/if}
+										</div>
 									</section>
 								{/if}
 
@@ -999,7 +1006,9 @@
 	.response-label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 	.response-label span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 	.response-label strong { font-size: 10px; letter-spacing: .04em; }
-	.final-response p { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
+	.response-markdown { margin-top: 10px; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }
+	.response-markdown :global(> :first-child) { margin-top: 0; }
+	.response-markdown :global(> :last-child) { margin-bottom: 0; }
 	.final-response.streaming .response-label span { animation: breathe 1.2s ease-in-out infinite; }
 	.text-cursor { display: inline-block; width: 2px; height: 1em; margin-left: 3px; vertical-align: -.12em; background: var(--accent); animation: pulse .75s steps(1) infinite; }
 	.result-card { padding: 16px; }
