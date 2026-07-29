@@ -298,6 +298,9 @@
 	): Phase[] => {
 		const labels = ['受付', '環境準備', '調査', '実装', '検証', '完了'];
 		if (!task) return labels.map((label) => ({ label, state: 'pending' }));
+		if (task.status === 'succeeded') {
+			return labels.map((label) => ({ label, state: 'complete' }));
+		}
 		const hasTool = (tools: string[]) =>
 			taskEvents.some(
 				(event) =>
@@ -686,7 +689,7 @@
 <style>
 	:global(body) { overflow: hidden; }
 	:global(.dark) .openm-chat { --bg: #0d0e0f; --panel: #141516; --raised: #1b1d1f; --line: #2a2c2f; --text: #f2f3ef; --muted: #989c96; --soft: #71756f; --bubble: #202225; --input: #1c1e20; }
-	.openm-chat { --bg: #f7f7f5; --panel: #fff; --raised: #f2f3f0; --line: #e3e4df; --text: #20221f; --muted: #73776f; --soft: #989b95; --bubble: #e9eae6; --input: #fff; --accent: #9ee63b; --accent-strong: #669e18; height: 100dvh; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+	.openm-chat { --bg: #f7f7f5; --panel: #fff; --raised: #f2f3f0; --line: #e3e4df; --text: #20221f; --muted: #73776f; --soft: #989b95; --bubble: #e9eae6; --input: #fff; --accent: #9ee63b; --accent-strong: #669e18; width: 100%; min-width: 0; height: 100dvh; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 	button, select, textarea, input { font: inherit; }
 	button { color: inherit; }
 	svg { width: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
